@@ -137,7 +137,6 @@ export async function saveLocalPlacedOrder(order: CustomerOrderListItem): Promis
 export async function getCustomerOrdersList(
   filterType: "ALL" | "ACTIVE" | "COMPLETED" | "CANCELLED" = "ALL"
 ): Promise<CustomerOrderListItem[]> {
-  const localOrders = await getLocalPlacedOrders();
   let remoteOrders: CustomerOrderListItem[] = [];
 
   try {
@@ -153,7 +152,6 @@ export async function getCustomerOrdersList(
           total,
           created_at,
           shop_id,
-          shops (name),
           addresses (line1, city, pincode),
           order_items (id, product_name_snapshot, unit_price_snapshot, quantity)
         `)
@@ -161,6 +159,20 @@ export async function getCustomerOrdersList(
         .order("created_at", { ascending: false });
 
       if (!error && data && data.length > 0) {
+        const shopIds = Array.from(new Set(data.map((o: any) => o.shop_id).filter(Boolean)));
+        const shopNameMap = new Map<string, string>();
+        if (shopIds.length > 0) {
+          const { data: storefrontRows } = await supabase
+            .from("public_storefronts")
+            .select("id, name")
+            .in("id", shopIds);
+          for (const sf of storefrontRows || []) {
+            if (sf?.id && sf?.name) {
+              shopNameMap.set(sf.id, sf.name);
+            }
+          }
+        }
+
         remoteOrders = data.map((o: any) => {
           const itemsList = (o.order_items || []).map((it: any) => ({
             id: it.id,
@@ -175,9 +187,9 @@ export async function getCustomerOrdersList(
           return {
             id: o.id,
             orderNumber: `ZUNO-${o.id.slice(0, 6).toUpperCase()}`,
-            shopId: o.shop_id || "shop-1",
-            shopName: (o.shops as any)?.name || "Eureka Fresh Mart",
-            shopDistance: "2.5 km away",
+            shopId: o.shop_id || "",
+            shopName: shopNameMap.get(o.shop_id) || "Local ZUNO Store",
+            shopDistance: "Nearby",
             createdAt: o.created_at,
             status: (o.status as OrderStatus) || OrderStatus.PLACED,
             total: Number(o.total),
@@ -193,22 +205,10 @@ export async function getCustomerOrdersList(
       }
     }
   } catch {
-    // fallback
+    return [];
   }
 
-  const map = new Map<string, CustomerOrderListItem>();
-  const baseList =
-    remoteOrders.length > 0
-      ? [...remoteOrders, ...localOrders]
-      : [...localOrders, ...FALLBACK_CUSTOMER_ORDERS];
-
-  baseList.forEach((ord) => {
-    if (!map.has(ord.id)) {
-      map.set(ord.id, ord);
-    }
-  });
-
-  const combined = Array.from(map.values()).sort(
+  const combined = remoteOrders.sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
 
@@ -237,44 +237,6 @@ export async function getCustomerOrdersList(
 }
 
 export async function getCustomerOrderDetails(orderId: string): Promise<OrderDetailData | null> {
-  const localOrders = await getLocalPlacedOrders();
-  const localMatch = localOrders.find((o) => o.id === orderId);
-
-  if (localMatch) {
-    const createdTime = localMatch.createdAt;
-    return {
-      id: localMatch.id,
-      orderNumber: localMatch.orderNumber,
-      status: localMatch.status,
-      createdAt: createdTime,
-      subtotal: localMatch.subtotal,
-      deliveryFee: 20,
-      platformFee: 5,
-      total: localMatch.total,
-      shopId: localMatch.shopId,
-      shopName: localMatch.shopName,
-      shopDistance: localMatch.shopDistance,
-      addressLabel: "Home",
-      addressLine: localMatch.addressLine,
-      recipientName: "Customer",
-      phone: "+91 98765 43210",
-      items: localMatch.items.map((it) => ({
-        id: it.id,
-        name: it.name,
-        unit: it.unit || "1 pack",
-        price: it.price,
-        quantity: it.quantity,
-        subtotal: it.price * it.quantity,
-      })),
-      paymentMethod: "Cash on Delivery",
-      paymentStatus: "PENDING",
-      deliveryPartnerName: "Ravi Kumar",
-      deliveryPartnerPhone: "+91 98765 12345",
-      deliveryPartnerVehicle: "DL8S AB 1234 · Honda Activa",
-      deliveryEta: "25–35 min",
-      timeline: buildTimeline(localMatch.status, createdTime),
-    };
-  }
 
   if (!orderId || !IS_UUID_REGEX.test(orderId)) {
     return getFallbackOrderDetails(orderId);
@@ -294,7 +256,6 @@ export async function getCustomerOrderDetails(orderId: string): Promise<OrderDet
         created_at,
         shop_id,
         address_id,
-        shops (name, description),
         addresses (label, line1, line2, pincode),
         order_items (id, product_name_snapshot, unit_price_snapshot, quantity, subtotal)
       `)
@@ -302,6 +263,18 @@ export async function getCustomerOrderDetails(orderId: string): Promise<OrderDet
       .maybeSingle();
 
     if (!error && order) {
+      let resolvedShopName = "Local ZUNO Store";
+      if (order.shop_id) {
+        const { data: sf } = await supabase
+          .from("public_storefronts")
+          .select("name")
+          .eq("id", order.shop_id)
+          .maybeSingle();
+        if (sf?.name) {
+          resolvedShopName = sf.name;
+        }
+      }
+
       const formattedItems: OrderDetailItem[] = (order.order_items || []).map((it: any) => ({
         id: it.id,
         name: it.product_name_snapshot,
@@ -323,7 +296,7 @@ export async function getCustomerOrderDetails(orderId: string): Promise<OrderDet
         platformFee: 5,
         total: Number(order.total),
         shopId: order.shop_id,
-        shopName: (order.shops as any)?.name || "Eureka Fresh Mart",
+        shopName: resolvedShopName,
         shopDistance: "2.5 km away",
         addressLabel: addr.label || "Home",
         addressLine: `${addr.line1 || "Near Railway Station"}, ${addr.line2 || "Renukoot"} - ${addr.pincode || "231217"}`,

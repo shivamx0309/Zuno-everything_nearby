@@ -8,10 +8,19 @@ export interface TransactionSummary {
   displayId: string;
   createdAt: string;
   customerName: string;
-  amount: number;
+  merchandiseSubtotal: number;
+  deliveryFee: number;
+  customerTotal: number;
   paymentMethod: string;
   paymentStatus: string;
   status: string;
+}
+
+interface FulfillmentContextSummary {
+  order_id: string;
+  customer_name: string | null;
+  payment_method: string | null;
+  payment_status: string | null;
 }
 
 export async function getShopEarningsAction(): Promise<{
@@ -24,14 +33,16 @@ export async function getShopEarningsAction(): Promise<{
   };
   pendingCount: number;
   metrics: {
-    totalRevenue: number;
-    todayRevenue: number;
-    settledRevenue: number;
-    pendingPayout: number;
+    grossMerchandiseRevenue: number;
+    todayMerchandiseRevenue: number;
+    deliveredMerchandiseValue: number;
+    totalDeliveryFees: number;
     completedOrdersCount: number;
     averageOrderValue: number;
   };
+  settlementSupported: boolean;
   transactions: TransactionSummary[];
+  error?: string;
 }> {
   const auth = await requireApprovedShopkeeper();
   const supabase = createServerSupabaseClient();
@@ -52,48 +63,66 @@ export async function getShopEarningsAction(): Promise<{
     isActive: Boolean(shopRow?.is_active ?? true),
   };
 
-  // 2. Query all orders for shop
+  // 2. Query orders using strictly verified schema columns (never non-existent payment_* cols)
   const { data: ordersRows, error: ordersErr } = await supabase
     .from("orders")
     .select(`
       id,
       customer_id,
       status,
+      subtotal,
+      delivery_fee,
       total,
-      payment_method,
-      payment_status,
       created_at
     `)
     .eq("shop_id", shopId)
     .order("created_at", { ascending: false });
 
   if (ordersErr || !ordersRows) {
+    console.error(
+      "[Earnings] Database query error:",
+      ordersErr?.code || "UNKNOWN",
+      ordersErr?.message || "Missing response"
+    );
     return {
       shop,
       pendingCount: 0,
       metrics: {
-        totalRevenue: 0,
-        todayRevenue: 0,
-        settledRevenue: 0,
-        pendingPayout: 0,
+        grossMerchandiseRevenue: 0,
+        todayMerchandiseRevenue: 0,
+        deliveredMerchandiseValue: 0,
+        totalDeliveryFees: 0,
         completedOrdersCount: 0,
         averageOrderValue: 0,
       },
+      settlementSupported: false,
       transactions: [],
+      error: "Unable to load order earnings right now. Please try refreshing.",
     };
   }
 
-  // Customer names
-  const customerIds = Array.from(new Set(ordersRows.map((o: any) => o.customer_id).filter(Boolean)));
-  const customerMap = new Map<string, string>();
-  if (customerIds.length > 0) {
-    const { data: profiles } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", customerIds);
-    if (profiles) {
-      for (const p of profiles) {
-        customerMap.set(p.id, p.full_name || "Customer");
+  // 3. Enrich with least-privilege customer name and payment status/method from payments relation
+  const ctxMap = new Map<string, FulfillmentContextSummary>();
+  if (ordersRows.length > 0) {
+    const orderIds = ordersRows.map((o: any) => o.id);
+    const { data: ctxRows, error: ctxErr } = await supabase.rpc(
+      "get_shop_order_fulfillment_context",
+      {
+        p_shop_id: shopId,
+        p_order_ids: orderIds,
+      }
+    );
+    if (ctxErr) {
+      console.warn(
+        "[Earnings] Scoped fulfillment context RPC unavailable:",
+        ctxErr.code,
+        ctxErr.message
+      );
+    } else if (Array.isArray(ctxRows)) {
+      for (const row of ctxRows as FulfillmentContextSummary[]) {
+        if (row?.order_id) {
+          ctxMap.set(row.order_id, row);
+        }
       }
     }
   }
@@ -101,15 +130,17 @@ export async function getShopEarningsAction(): Promise<{
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 
-  let totalRevenue = 0;
-  let todayRevenue = 0;
-  let settledRevenue = 0;
-  let pendingPayout = 0;
+  let grossMerchandiseRevenue = 0;
+  let todayMerchandiseRevenue = 0;
+  let deliveredMerchandiseValue = 0;
+  let totalDeliveryFees = 0;
   let completedOrdersCount = 0;
   let pendingCount = 0;
 
   const transactions: TransactionSummary[] = ordersRows.map((row: any) => {
-    const amount = Number(row.total || 0);
+    const merchandiseSubtotal = Number(row.subtotal || 0);
+    const deliveryFee = Number(row.delivery_fee || 0);
+    const customerTotal = Number(row.total || 0);
     const orderTime = new Date(row.created_at).getTime();
 
     if (row.status === "PLACED") {
@@ -117,44 +148,49 @@ export async function getShopEarningsAction(): Promise<{
     }
 
     if (row.status !== "CANCELLED" && row.status !== "REJECTED") {
-      totalRevenue += amount;
+      grossMerchandiseRevenue += merchandiseSubtotal;
+      totalDeliveryFees += deliveryFee;
       if (orderTime >= todayStart) {
-        todayRevenue += amount;
+        todayMerchandiseRevenue += merchandiseSubtotal;
       }
       if (row.status === "DELIVERED") {
         completedOrdersCount++;
-        settledRevenue += amount;
-      } else {
-        pendingPayout += amount;
+        deliveredMerchandiseValue += merchandiseSubtotal;
       }
     }
+
+    const ctx = ctxMap.get(row.id);
 
     return {
       id: row.id,
       displayId: `#ORD-${row.id.slice(0, 6).toUpperCase()}`,
       createdAt: row.created_at,
-      customerName: customerMap.get(row.customer_id) || "Local Customer",
-      amount,
-      paymentMethod: row.payment_method || "COD",
-      paymentStatus: row.payment_status || "PENDING",
+      customerName: ctx?.customer_name || "Verified Customer",
+      merchandiseSubtotal,
+      deliveryFee,
+      customerTotal,
+      paymentMethod: ctx?.payment_method || "Unavailable",
+      paymentStatus: ctx?.payment_status || "Unavailable",
       status: row.status || "PLACED",
     };
   });
 
   const averageOrderValue =
-    completedOrdersCount > 0 ? Math.round(settledRevenue / completedOrdersCount) : 0;
+    completedOrdersCount > 0 ? Math.round(deliveredMerchandiseValue / completedOrdersCount) : 0;
 
   return {
     shop,
     pendingCount,
     metrics: {
-      totalRevenue,
-      todayRevenue,
-      settledRevenue,
-      pendingPayout,
+      grossMerchandiseRevenue,
+      todayMerchandiseRevenue,
+      deliveredMerchandiseValue,
+      totalDeliveryFees,
       completedOrdersCount,
       averageOrderValue,
     },
+    // Commission, refund, and bank payout ledger tables do not exist in schema yet
+    settlementSupported: false,
     transactions,
   };
 }

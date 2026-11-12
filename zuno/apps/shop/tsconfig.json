@@ -13,6 +13,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@zuno/types": [
+        "../../packages/types/src/index.ts"
       ]
     },
     "allowJs": true,

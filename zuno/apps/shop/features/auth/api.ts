@@ -1,5 +1,12 @@
 import { createClient } from "../../lib/supabase";
 import { normalizePhoneE164 } from "@zuno/validation";
+import {
+  normalizeIndianPhone,
+  sanitizeRedirectUrl,
+  validateShopkeeperPassword,
+} from "../../lib/shop-auth-utils";
+
+export { sanitizeRedirectUrl };
 
 export interface ShopkeeperAccount {
   id: string;
@@ -16,6 +23,8 @@ export interface ShopkeeperAccount {
 export interface RegisterShopInput {
   ownerFullName: string;
   phone: string;
+  password: string;
+  confirmPassword: string;
   shopName: string;
   description?: string;
   addressLine: string;
@@ -23,205 +32,205 @@ export interface RegisterShopInput {
   pincode: string;
 }
 
-export async function requestShopkeeperOtp(phone: string): Promise<{ success: boolean; message: string }> {
-  const supabase = createClient();
-  const clean10 = phone.replace(/\D/g, "").slice(-10);
-  if (clean10.length < 10) {
-    throw new Error("Please enter a valid 10-digit mobile number.");
-  }
-  const formattedPhone = normalizePhoneE164(clean10);
-
-  try {
-    const { error: phoneErr } = await supabase.auth.signInWithOtp({
-      phone: formattedPhone,
-    });
-
-    if (phoneErr) {
-      const errMsg = phoneErr.message || "";
-      const errCode = (phoneErr as any).code || (phoneErr as any).error_code;
-      if (
-        errMsg.toLowerCase().includes("unsupported phone provider") ||
-        errCode === "phone_provider_disabled" ||
-        phoneErr.status === 400
-      ) {
-        throw new Error(
-          "Supabase SMS phone provider is currently disabled. Please enable the Phone provider in your Supabase Dashboard (under Authentication > Providers > Phone) or configure a Test Phone Number (e.g. +918887602317 with code 123456)."
-        );
-      }
-      throw new Error(errMsg || "Failed to send OTP.");
-    }
-
-    return { success: true, message: `OTP sent successfully to +91 ${clean10}.` };
-  } catch (err: any) {
-    throw new Error(err?.message || "Failed to send OTP.");
-  }
-}
-
-export async function verifyShopkeeperOtp(
+/**
+ * Authenticates a shopkeeper via Indian mobile number + password through the server-side
+ * login endpoint (derives synthetic email server-side and manages SSR session cookies).
+ */
+export async function loginWithPassword(
   phone: string,
-  token: string
-): Promise<{ success: boolean; user?: any; session?: any; error?: string }> {
-  const supabase = createClient();
-  const clean10 = phone.replace(/\D/g, "").slice(-10);
-  const formattedPhone = normalizePhoneE164(clean10);
-  const cleanToken = token.trim();
-
-  if (!cleanToken || cleanToken.length < 6) {
+  password: string,
+  options?: { rememberMe?: boolean; redirect?: string }
+): Promise<{
+  success: boolean;
+  redirect?: string;
+  isApproved?: boolean;
+  approvalStatus?: string;
+  error?: string;
+  code?: string;
+}> {
+  const normalized = normalizeIndianPhone(phone);
+  if (!normalized.valid) {
     return {
       success: false,
-      error: "Please enter the complete 6-digit OTP.",
+      error: normalized.error || "Please enter a valid 10-digit Indian mobile number.",
     };
+  }
+  if (!password || password.trim().length === 0) {
+    return { success: false, error: "Please enter your password." };
   }
 
   try {
-    const res = await supabase.auth.verifyOtp({
-      phone: formattedPhone,
-      token: cleanToken,
-      type: "sms",
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: normalized.clean10,
+        password,
+        rememberMe: options?.rememberMe ?? true,
+        redirect: options?.redirect,
+      }),
     });
 
-    if (res.error || !res.data?.user) {
-      const errMsg = res.error?.message || "";
-      const errCode = (res.error as any)?.code || (res.error as any)?.error_code;
-      if (
-        errMsg.toLowerCase().includes("token has expired") ||
-        errCode === "otp_expired" ||
-        res.error?.status === 403
-      ) {
-        return {
-          success: false,
-          error: "Verification code has expired or is invalid. Please request a fresh OTP.",
-        };
-      }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
       return {
         success: false,
-        error: errMsg || "Invalid or expired OTP. Please try again.",
+        error: data?.error || "Invalid mobile number or password.",
+        code: data?.code,
       };
     }
 
     return {
       success: true,
-      user: res.data.user,
-      session: res.data.session,
+      redirect: data.redirect || "/dashboard",
+      isApproved: Boolean(data.isApproved),
+      approvalStatus: data.approvalStatus,
     };
-  } catch (err: any) {
+  } catch {
     return {
       success: false,
-      error: err?.message || "Failed to verify OTP.",
+      error: "Unable to reach authentication service. Please check your connection.",
+      code: "network_error",
     };
   }
 }
 
-export async function registerShopkeeper(input: RegisterShopInput): Promise<ShopkeeperAccount> {
-  const supabase = createClient();
-  const clean10 = input.phone.replace(/\D/g, "").slice(-10);
-  const formattedPhone = normalizePhoneE164(clean10);
-
-  // Call the atomic registration RPC (SECURITY DEFINER)
-  const { data: rpcRes, error: rpcErr } = await supabase.rpc("register_shop_application", {
-    p_owner_name: input.ownerFullName,
-    p_phone: formattedPhone,
-    p_shop_name: input.shopName,
-    p_description: input.description || "Fresh local grocery & daily essentials",
-    p_address_line: input.addressLine,
-    p_locality: input.locality,
-    p_pincode: input.pincode || "231217",
-  });
-
-  if (!rpcErr && rpcRes?.success) {
+/**
+ * Updates the password for the currently authenticated shopkeeper session.
+ */
+export async function setShopkeeperPassword(
+  newPassword: string,
+  confirmPassword: string
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const check = validateShopkeeperPassword(newPassword);
+  if (!check.valid) {
+    return { success: false, error: check.error };
+  }
+  if (newPassword !== confirmPassword) {
     return {
-      id: rpcRes.shop_id,
-      userId: rpcRes.user_id,
-      fullName: input.ownerFullName,
-      phone: formattedPhone,
-      role: "SHOPKEEPER",
-      shopId: rpcRes.shop_id,
-      shopName: input.shopName,
-      isApproved: false,
-      approvalStatus: "PENDING",
+      success: false,
+      error: "Passwords do not match. Please re-enter.",
     };
   }
-
-  if (rpcErr) {
-    console.error("[ShopAuth] Registration RPC error:", rpcErr);
-    throw new Error(`Registration failed: ${rpcErr.message}`);
-  }
-
-  throw new Error("Unable to complete shop registration. Please verify details.");
-}
-
-export async function getShopByPhone(phone: string): Promise<ShopkeeperAccount | null> {
-  const supabase = createClient();
-  const clean10 = phone.replace(/\D/g, "").slice(-10);
-  const formattedPhone = normalizePhoneE164(clean10);
 
   try {
-    const { data: shop, error } = await supabase
-      .from("shops")
-      .select("*")
-      .or(`phone.eq.${formattedPhone},phone.eq.${clean10}`)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (shop && !error) {
+    const res = await fetch("/api/auth/set-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ newPassword, confirmPassword }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
       return {
-        id: shop.id,
-        userId: shop.owner_id,
-        fullName: "Shop Owner",
-        phone: shop.phone || phone,
-        role: "SHOPKEEPER",
-        shopId: shop.id,
-        shopName: shop.name,
-        isApproved: Boolean(shop.is_approved),
-        approvalStatus: (shop.approval_status as any) || (shop.is_approved ? "APPROVED" : "PENDING"),
+        success: false,
+        error: data?.error || "Failed to update password.",
       };
     }
-  } catch (err) {
-    console.warn("[ShopAuth] Error fetching shop by phone:", err);
+    return {
+      success: true,
+      message: data.message || "Password updated successfully.",
+    };
+  } catch {
+    return {
+      success: false,
+      error: "Network error while updating password.",
+    };
   }
-
-  return null;
 }
 
-export async function getCurrentShopkeeper(phoneFallback?: string): Promise<ShopkeeperAccount | null> {
+/**
+ * Resolves the authenticated user's shop record and approval status from Supabase.
+ */
+export async function resolveShopApproval(userId: string): Promise<{
+  shop: any | null;
+  isApproved: boolean;
+  approvalStatus: string;
+}> {
   const supabase = createClient();
-  try {
-    const { data: userData } = await supabase.auth.getUser();
-    if (userData?.user) {
-      const userId = userData.user.id;
-      const { data: shop } = await supabase
-        .from("shops")
-        .select("*")
-        .eq("owner_id", userId)
-        .maybeSingle();
+  const { data: shop } = await supabase
+    .from("shops")
+    .select("id, name, is_approved, approval_status, owner_id")
+    .eq("owner_id", userId)
+    .maybeSingle();
 
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", userId)
-        .maybeSingle();
-
-      if (shop) {
-        return {
-          id: shop.id,
-          userId: userId,
-          fullName: profile?.full_name || "Shop Owner",
-          phone: shop.phone || profile?.phone || "",
-          role: "SHOPKEEPER",
-          shopId: shop.id,
-          shopName: shop.name,
-          isApproved: Boolean(shop.is_approved),
-          approvalStatus: (shop.approval_status as any) || (shop.is_approved ? "APPROVED" : "PENDING"),
-        };
-      }
-    }
-  } catch (err) {
-    console.warn("[ShopAuth] Error fetching current shopkeeper:", err);
+  if (!shop) {
+    return { shop: null, isApproved: false, approvalStatus: "UNREGISTERED" };
   }
 
-  if (phoneFallback) {
-    return getShopByPhone(phoneFallback);
+  const isApproved = Boolean(shop.is_approved) && shop.approval_status === "APPROVED";
+  return {
+    shop,
+    isApproved,
+    approvalStatus: shop.approval_status || (shop.is_approved ? "APPROVED" : "PENDING"),
+  };
+}
+
+/**
+ * Registers a new shopkeeper account with password and submits the PENDING shop application.
+ */
+export async function registerShopkeeper(input: RegisterShopInput): Promise<{
+  shopId: string;
+  shopName: string;
+  approvalStatus: "PENDING";
+  requiresConfirmation: boolean;
+  redirect: string;
+}> {
+  const normalized = normalizeIndianPhone(input.phone);
+  if (!normalized.valid) {
+    throw new Error(normalized.error || "Please enter a valid 10-digit Indian mobile number.");
+  }
+
+  const passwordCheck = validateShopkeeperPassword(input.password);
+  if (!passwordCheck.valid) {
+    throw new Error(passwordCheck.error || "Please enter a stronger password.");
+  }
+
+  if (input.password !== input.confirmPassword) {
+    throw new Error("Passwords do not match. Please re-enter.");
+  }
+
+  const res = await fetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...input,
+      phone: normalized.clean10,
+    }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.success) {
+    throw new Error(
+      data?.error || "Unable to complete shop registration. Please verify your details."
+    );
+  }
+
+  return {
+    shopId: data.shopId,
+    shopName: data.shopName || input.shopName,
+    approvalStatus: "PENDING",
+    requiresConfirmation: Boolean(data.requiresConfirmation),
+    redirect: data.redirect || "/status?registered=true",
+  };
+}
+
+/**
+ * Fetches the authenticated shopkeeper's application status from the server-side
+ * session endpoint (/api/auth/status). Never queries shops by unauthenticated phone.
+ */
+export async function getCurrentShopkeeper(): Promise<ShopkeeperAccount | null> {
+  try {
+    const res = await fetch("/api/auth/status", {
+      method: "GET",
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const data = await res.json().catch(() => ({}));
+    return data?.shop || null;
+  } catch (err) {
+    console.warn("[ShopAuth] Error fetching current shopkeeper:", err);
   }
 
   return null;

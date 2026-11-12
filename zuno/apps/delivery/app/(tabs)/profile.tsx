@@ -57,9 +57,9 @@ const BORDER = "#E5E7EB";
 const CARD_BG = "#FFFFFF";
 
 // Verified Support Contacts from Scaffold
-const SUPPORT_PHONE = "+91 1800 123 4567";
-const SUPPORT_PHONE_DIAL = "+9118001234567";
-const SUPPORT_EMAIL = "partners@zuno.com";
+const SUPPORT_PHONE = "+918887602317";
+const SUPPORT_PHONE_DIAL = "++918887602317";
+const SUPPORT_EMAIL = "zunonearby@gmail.com";
 
 const DEFAULT_AVATAR =
   "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=256&h=256&q=80";

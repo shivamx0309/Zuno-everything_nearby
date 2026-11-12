@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -24,8 +24,13 @@ import {
 } from "lucide-react-native";
 import { posthog } from "@/lib/posthog";
 import { analytics } from "@/lib/analytics";
-import { useCartStore, CartItem } from "@/store/cartStore";
-import { CATEGORY_PRODUCTS_CATALOG } from "@/features/products/api";
+import {
+  useCartStore,
+  CartItem,
+  calculateDeliveryFeeForSubtotal,
+} from "@/store/cartStore";
+import { getPopularProducts, type CategoryProduct } from "@/features/products/api";
+import { getPublicStorefrontsByIds, type ShopData } from "@/features/shops/api";
 import { getProductImageSource } from "@/assets/productImages";
 
 const GREEN = "#0F5D3A";
@@ -45,6 +50,9 @@ export default function CartScreen() {
   const moveToCartFromSaved = useCartStore((state) => state.moveToCartFromSaved);
   const clearCart = useCartStore((state) => state.clearCart);
   const addToCartStore = useCartStore((state) => state.addToCart);
+  const setActiveCheckoutShopId = useCartStore(
+    (state) => state.setActiveCheckoutShopId
+  );
 
   const cartCount = useCartStore((state) => state.getCartCount());
   const cartSubtotal = useCartStore((state) => state.getCartTotal());
@@ -53,43 +61,114 @@ export default function CartScreen() {
   const estimatedTotal = useCartStore((state) => state.getEstimatedTotal());
 
   const [showSavedSection, setShowSavedSection] = useState(true);
+  const [liveStorefronts, setLiveStorefronts] = useState<
+    Record<string, ShopData>
+  >({});
+  const [loadingStorefronts, setLoadingStorefronts] = useState(false);
+  const [popularSuggestions, setPopularSuggestions] = useState<
+    CategoryProduct[]
+  >([]);
 
   const cartItemsList = useMemo(() => Object.values(cartItemsObj), [cartItemsObj]);
   const savedForLaterList = useMemo(() => Object.values(savedForLaterObj), [savedForLaterObj]);
 
-  // Group items by shop
+  // Group items strictly by shop_id (One order = one shop)
   const itemsByShop = useMemo(() => {
-    const map: Record<string, { shopName: string; shopDistance: string; items: CartItem[] }> = {};
+    const map: Record<
+      string,
+      {
+        shopName: string;
+        shopDistance: string;
+        items: CartItem[];
+        subtotal: number;
+        deliveryFee: number;
+        total: number;
+      }
+    > = {};
     cartItemsList.forEach((item) => {
-      const sId = item.shopId || "shop-1";
-      const sName = item.shopName || "Eureka Fresh Mart";
-      const sDist = item.shopDistance || "2.5 km away";
+      const sId = item.shopId;
+      if (!sId) return;
+      const sName = item.shopName || "Local Shop";
+      const sDist = item.shopDistance || "Nearby";
 
       if (!map[sId]) {
-        map[sId] = { shopName: sName, shopDistance: sDist, items: [] };
+        map[sId] = {
+          shopName: sName,
+          shopDistance: sDist,
+          items: [],
+          subtotal: 0,
+          deliveryFee: 0,
+          total: 0,
+        };
       }
       map[sId].items.push(item);
+      map[sId].subtotal += item.price * item.quantity;
     });
+
+    Object.values(map).forEach((group) => {
+      group.subtotal = Math.round(group.subtotal * 100) / 100;
+      group.deliveryFee = calculateDeliveryFeeForSubtotal(group.subtotal);
+      group.total =
+        Math.round((group.subtotal + group.deliveryFee) * 100) / 100;
+    });
+
     return map;
   }, [cartItemsList]);
 
   const shopKeys = Object.keys(itemsByShop);
   const isSingleShop = shopKeys.length <= 1;
 
-  const handleProceedToCheckout = () => {
+  useEffect(() => {
+    let mounted = true;
+    async function loadStorefronts() {
+      if (shopKeys.length === 0) {
+        if (mounted) setLiveStorefronts({});
+        return;
+      }
+      setLoadingStorefronts(true);
+      try {
+        const res = await getPublicStorefrontsByIds(shopKeys);
+        if (mounted) setLiveStorefronts(res);
+      } finally {
+        if (mounted) setLoadingStorefronts(false);
+      }
+    }
+    loadStorefronts();
+    return () => {
+      mounted = false;
+    };
+  }, [shopKeys.join(",")]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (cartCount === 0) {
+      getPopularProducts()
+        .then((list) => {
+          if (mounted) setPopularSuggestions(list.slice(0, 4));
+        })
+        .catch(() => {});
+    }
+    return () => {
+      mounted = false;
+    };
+  }, [cartCount]);
+
+  const handleProceedToShopCheckout = (targetShopId: string) => {
+    const group = itemsByShop[targetShopId];
+    if (!group) return;
+    setActiveCheckoutShopId(targetShopId);
     analytics.trackCheckoutStarted?.({
-      cartTotal: estimatedTotal,
-      cartCount,
+      cartTotal: group.total,
+      cartCount: group.items.reduce((s, i) => s + i.quantity, 0),
     });
     posthog?.capture("checkout_clicked", {
-      cart_total: estimatedTotal,
-      cart_count: cartCount,
+      shop_id: targetShopId,
+      cart_total: group.total,
+      cart_count: group.items.length,
       shop_count: shopKeys.length,
     });
-    router.push("/checkout" as never);
+    router.push(`/checkout?shopId=${encodeURIComponent(targetShopId)}` as never);
   };
-
-  const popularSuggestions = CATEGORY_PRODUCTS_CATALOG.slice(0, 4);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -176,9 +255,14 @@ export default function CartScreen() {
                         onPress={() =>
                           addToCartStore({
                             id: item.id,
+                            shopProductId: item.shopProductId,
+                            productId: item.productId,
                             name: item.name,
                             price: item.price,
                             unit: item.unit,
+                            shopId: item.shopId,
+                            shopName: item.shopName,
+                            stock: item.stock,
                           })
                         }
                       >
@@ -197,15 +281,21 @@ export default function CartScreen() {
             contentContainerStyle={styles.scrollContent}
           >
             {/* Single Shop / Multi Shop Context Banner */}
-            {isSingleShop && shopKeys.length > 0 && (
+            {shopKeys.length > 0 && (
               <View style={styles.singleShopBanner}>
                 <View style={styles.singleShopIconCircle}>
                   <Store size={18} color={GREEN} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.singleShopTitle}>Items from a single shop</Text>
+                  <Text style={styles.singleShopTitle}>
+                    {isSingleShop
+                      ? "Items from a single shop"
+                      : `One order per shop (${shopKeys.length} shops in cart)`}
+                  </Text>
                   <Text style={styles.singleShopSub}>
-                    You're shopping from {itemsByShop[shopKeys[0]].shopName}
+                    {isSingleShop
+                      ? `You're shopping from ${itemsByShop[shopKeys[0]].shopName}`
+                      : "Each shop is checked out separately so orders, stock, and delivery stay independent."}
                   </Text>
                 </View>
                 <ChevronRight size={16} color={MUTED} />
@@ -215,24 +305,49 @@ export default function CartScreen() {
             {/* Cart Items Grouped By Shop */}
             {shopKeys.map((sId) => {
               const shopGroup = itemsByShop[sId];
+              const liveSf = liveStorefronts[sId];
+              const avail = liveSf?.availability;
+              const isChecking = loadingStorefronts && !liveSf;
+              const isShopOpen = avail ? avail.isOpenNow : false;
+              const canCheckoutGroup = Boolean(
+                liveSf && avail?.canAcceptDeliveryOrder
+              );
+              const statusText = isChecking
+                ? "Checking live status..."
+                : !liveSf
+                ? "Offline / Unavailable"
+                : `${avail?.openStatusLabel || "Closed"} · ${
+                    avail?.deliveryStatusLabel || "Delivery Unavailable"
+                  }`;
+
               return (
                 <View key={sId} style={styles.shopGroupCard}>
                   {/* Shop Info Header */}
-                  <View style={styles.shopGroupHeader}>
+                  <Pressable
+                    style={styles.shopGroupHeader}
+                    onPress={() => router.push(`/shop/${sId}` as never)}
+                  >
                     <View style={styles.shopHeaderIconBox}>
                       <Store size={16} color={GREEN} />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.shopGroupTitle}>{shopGroup.shopName}</Text>
+                      <Text style={styles.shopGroupTitle}>
+                        {liveSf?.name || shopGroup.shopName}
+                      </Text>
                       <View style={styles.shopStatusRow}>
-                        <View style={styles.greenDot} />
+                        <View
+                          style={[
+                            styles.greenDot,
+                            !isShopOpen && !isChecking && { backgroundColor: "#DC2626" },
+                          ]}
+                        />
                         <Text style={styles.shopStatusText}>
-                          Open · {shopGroup.shopDistance}
+                          {statusText} · {shopGroup.shopDistance}
                         </Text>
                       </View>
                     </View>
                     <ChevronRight size={16} color={MUTED} />
-                  </View>
+                  </Pressable>
 
                   {/* Cart Item Cards */}
                   {shopGroup.items.map((item) => (
@@ -295,6 +410,39 @@ export default function CartScreen() {
                       </View>
                     </View>
                   ))}
+
+                  {/* Shop Group Summary & Independent Checkout Button */}
+                  <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: "#F1F5F2", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <View>
+                      <Text style={{ fontSize: 11, color: MUTED, fontWeight: "600" }}>
+                        Subtotal ₹{shopGroup.subtotal} · Delivery{" "}
+                        {shopGroup.deliveryFee === 0 ? "FREE" : `₹${shopGroup.deliveryFee}`}
+                      </Text>
+                      <Text style={{ fontSize: 14, fontWeight: "900", color: DARK }}>
+                        Order Total: ₹{shopGroup.total}
+                      </Text>
+                    </View>
+
+                    <Pressable
+                      style={[
+                        styles.checkoutBtn,
+                        (!canCheckoutGroup || isChecking) && { opacity: 0.5 },
+                      ]}
+                      disabled={!canCheckoutGroup || isChecking}
+                      onPress={() => handleProceedToShopCheckout(sId)}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                        <Text style={styles.checkoutBtnText}>
+                          {isChecking
+                            ? "Checking..."
+                            : canCheckoutGroup
+                            ? "Checkout Shop"
+                            : "Unavailable"}
+                        </Text>
+                        <ArrowRight size={14} color="#FFFFFF" />
+                      </View>
+                    </Pressable>
+                  </View>
                 </View>
               );
             })}
@@ -409,9 +557,26 @@ export default function CartScreen() {
                 <Text style={styles.continueShoppingSecondaryText}>+ Add More</Text>
               </Pressable>
 
-              <Pressable style={styles.checkoutBtn} onPress={handleProceedToCheckout}>
+              <Pressable
+                style={[
+                  styles.checkoutBtn,
+                  (!isSingleShop ||
+                    shopKeys.length === 0 ||
+                    !liveStorefronts[shopKeys[0]]?.availability
+                      ?.canAcceptDeliveryOrder) && { opacity: 0.5 },
+                ]}
+                disabled={
+                  !isSingleShop ||
+                  shopKeys.length === 0 ||
+                  !liveStorefronts[shopKeys[0]]?.availability
+                    ?.canAcceptDeliveryOrder
+                }
+                onPress={() => handleProceedToShopCheckout(shopKeys[0])}
+              >
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                  <Text style={styles.checkoutBtnText}>Confirm Order</Text>
+                  <Text style={styles.checkoutBtnText}>
+                    {isSingleShop ? "Confirm Order" : "Select Shop Above"}
+                  </Text>
                   <ArrowRight size={16} color="#FFFFFF" />
                 </View>
               </Pressable>

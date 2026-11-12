@@ -9,6 +9,8 @@ import {
   Search,
   PackageOpen,
   AlertCircle,
+  Pencil,
+  Check,
   X,
   CheckCircle2,
 } from "lucide-react";
@@ -18,6 +20,10 @@ import {
   getShopInventoryAction,
   updateProductStockAction,
 } from "../../features/inventory/api";
+import {
+  parseStockQuantityInput,
+  recalculateInventoryKpis,
+} from "../../lib/inventory-utils";
 
 export default function InventoryClient({
   initialData,
@@ -34,6 +40,7 @@ export default function InventoryClient({
     items: InventoryItem[];
     lowStockCount: number;
     outOfStockCount: number;
+    error?: string;
   };
 }) {
   const [data, setData] = useState(initialData);
@@ -41,49 +48,121 @@ export default function InventoryClient({
   const [selectedFilter, setSelectedFilter] = useState<string>("ALL");
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [exactQuantityInput, setExactQuantityInput] = useState<string>("");
+  const [inputValidationError, setInputValidationError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(
+    initialData.error ? { type: "error", text: initialData.error } : null
+  );
 
   const refreshInventory = async () => {
     try {
       setRefreshing(true);
       const refreshed = await getShopInventoryAction();
       setData(refreshed);
+      if (refreshed.error) {
+        setFeedback({ type: "error", text: refreshed.error });
+      }
     } catch (err: any) {
-      alert(err?.message || "Failed to refresh inventory.");
+      setFeedback({
+        type: "error",
+        text: err?.message || "Failed to refresh inventory.",
+      });
     } finally {
       setRefreshing(false);
     }
   };
 
-  const handleAdjustStock = async (item: InventoryItem, delta: number) => {
-    const newStock = Math.max(0, item.stock + delta);
+  const commitStockUpdate = async (
+    item: InventoryItem,
+    targetStock: number,
+    closeEditorAfter = false
+  ) => {
+    if (updatingId) return;
+    const previousSnapshot = data;
     setUpdatingId(item.id);
+    setFeedback(null);
+    setInputValidationError(null);
+
     try {
-      await updateProductStockAction(item.id, newStock);
-      // Optimistic update locally
-      setData((prev) => ({
-        ...prev,
-        items: prev.items.map((it) =>
+      const res = await updateProductStockAction(
+        item.id,
+        targetStock,
+        item.stock
+      );
+
+      setData((prev) => {
+        const updatedItems = prev.items.map((it) =>
           it.id === item.id
             ? {
                 ...it,
-                stock: newStock,
-                isAvailable: newStock > 0,
-                status:
-                  newStock === 0
-                    ? "OUT_OF_STOCK"
-                    : newStock < 10
-                    ? "LOW_STOCK"
-                    : "HEALTHY",
+                stock: res.newStock,
+                isAvailable: res.newStock > 0,
+                status: res.status,
               }
             : it
-        ),
-      }));
+        );
+        const nextKpis = recalculateInventoryKpis(updatedItems);
+        return {
+          ...prev,
+          items: updatedItems,
+          lowStockCount: nextKpis.lowStockCount,
+          outOfStockCount: nextKpis.outOfStockCount,
+        };
+      });
+
+      if (closeEditorAfter) {
+        setEditingItemId(null);
+        setExactQuantityInput("");
+      }
+
+      setFeedback({
+        type: "success",
+        text: `Updated "${item.name}" stock to ${res.newStock} ${item.unit}.`,
+      });
     } catch (err: any) {
-      alert(err?.message || "Failed to update stock.");
-      await refreshInventory();
+      setData(previousSnapshot);
+      const msg = err?.message || "Failed to update stock.";
+      if (closeEditorAfter) {
+        setInputValidationError(msg);
+      }
+      setFeedback({ type: "error", text: msg });
+      if (msg.toLowerCase().includes("concurrently")) {
+        await refreshInventory();
+      }
     } finally {
       setUpdatingId(null);
     }
+  };
+
+  const handleAdjustStock = async (item: InventoryItem, delta: number) => {
+    const newStock = Math.max(0, item.stock + delta);
+    await commitStockUpdate(item, newStock, false);
+  };
+
+  const handleStartExactEdit = (item: InventoryItem) => {
+    setEditingItemId(item.id);
+    setExactQuantityInput(String(item.stock));
+    setInputValidationError(null);
+  };
+
+  const handleCancelExactEdit = () => {
+    if (updatingId) return;
+    setEditingItemId(null);
+    setExactQuantityInput("");
+    setInputValidationError(null);
+  };
+
+  const handleSaveExactEdit = async (item: InventoryItem) => {
+    const parsed = parseStockQuantityInput(exactQuantityInput);
+    if (!parsed.valid) {
+      setInputValidationError(parsed.error);
+      return;
+    }
+    await commitStockUpdate(item, parsed.stock, true);
   };
 
   const filteredItems = data.items.filter((item) => {
@@ -125,6 +204,33 @@ export default function InventoryClient({
         </div>
       }
     >
+      {feedback && (
+        <div
+          role={feedback.type === "error" ? "alert" : "status"}
+          className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            feedback.type === "error"
+              ? "bg-red-50 border-red-200 text-red-800"
+              : "bg-emerald-50 border-emerald-200 text-emerald-800"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {feedback.type === "error" ? (
+              <AlertCircle size={16} className="text-red-600 flex-shrink-0" />
+            ) : (
+              <CheckCircle2 size={16} className="text-emerald-700 flex-shrink-0" />
+            )}
+            <span>{feedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            className="font-bold hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
         <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm">
@@ -270,43 +376,113 @@ export default function InventoryClient({
                         )}
                       </td>
                       <td className="py-3.5 px-4 text-right">
-                        <div className="inline-flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl p-1">
-                          <button
-                            onClick={() => handleAdjustStock(item, -5)}
-                            disabled={isUpdating || item.stock === 0}
-                            title="Decrease by 5"
-                            className="px-2 py-0.5 bg-white hover:bg-gray-100 text-gray-700 rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
-                          >
-                            -5
-                          </button>
-                          <button
-                            onClick={() => handleAdjustStock(item, -1)}
-                            disabled={isUpdating || item.stock === 0}
-                            title="Decrease by 1"
-                            className="px-2 py-0.5 bg-white hover:bg-gray-100 text-gray-700 rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
-                          >
-                            -1
-                          </button>
-                          <span className="px-2 font-black text-gray-900 min-w-[28px] text-center">
-                            {isUpdating ? "..." : item.stock}
-                          </span>
-                          <button
-                            onClick={() => handleAdjustStock(item, 1)}
-                            disabled={isUpdating}
-                            title="Increase by 1"
-                            className="px-2 py-0.5 bg-white hover:bg-gray-100 text-gray-700 rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
-                          >
-                            +1
-                          </button>
-                          <button
-                            onClick={() => handleAdjustStock(item, 10)}
-                            disabled={isUpdating}
-                            title="Increase by 10"
-                            className="px-2 py-0.5 bg-[#0F5D3A] hover:bg-[#22A06B] text-white rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
-                          >
-                            +10
-                          </button>
-                        </div>
+                        {editingItemId === item.id ? (
+                          <div className="inline-flex flex-col items-end gap-1">
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                void handleSaveExactEdit(item);
+                              }}
+                              className="inline-flex items-center gap-1.5"
+                            >
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                inputMode="numeric"
+                                aria-label={`Exact stock quantity for ${item.name}`}
+                                value={exactQuantityInput}
+                                onChange={(e) => {
+                                  setExactQuantityInput(e.target.value);
+                                  if (inputValidationError) setInputValidationError(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape") {
+                                    handleCancelExactEdit();
+                                  }
+                                }}
+                                disabled={isUpdating}
+                                className="w-20 bg-[#F8FAF6] border border-[#22A06B] rounded-lg px-2 py-1 text-xs font-black text-gray-900 text-center focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
+                                autoFocus
+                              />
+                              <button
+                                type="submit"
+                                disabled={isUpdating}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 bg-[#0F5D3A] hover:bg-[#22A06B] text-white rounded-lg text-xs font-bold transition disabled:opacity-50"
+                              >
+                                <Check size={12} />
+                                <span>{isUpdating ? "Saving..." : "Save"}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleCancelExactEdit}
+                                disabled={isUpdating}
+                                className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold transition disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                            </form>
+                            {inputValidationError && (
+                              <span className="text-[11px] font-semibold text-red-600">
+                                {inputValidationError}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="inline-flex items-center gap-1.5 flex-wrap justify-end">
+                            <div className="inline-flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl p-1">
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustStock(item, -5)}
+                                disabled={isUpdating || Boolean(updatingId) || item.stock === 0}
+                                title="Decrease by 5"
+                                className="px-2 py-0.5 bg-white hover:bg-gray-100 text-gray-700 rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
+                              >
+                                -5
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustStock(item, -1)}
+                                disabled={isUpdating || Boolean(updatingId) || item.stock === 0}
+                                title="Decrease by 1"
+                                className="px-2 py-0.5 bg-white hover:bg-gray-100 text-gray-700 rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
+                              >
+                                -1
+                              </button>
+                              <span className="px-2 font-black text-gray-900 min-w-[28px] text-center">
+                                {isUpdating ? "..." : item.stock}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustStock(item, 1)}
+                                disabled={isUpdating || Boolean(updatingId)}
+                                title="Increase by 1"
+                                className="px-2 py-0.5 bg-white hover:bg-gray-100 text-gray-700 rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
+                              >
+                                +1
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustStock(item, 10)}
+                                disabled={isUpdating || Boolean(updatingId)}
+                                title="Increase by 10"
+                                className="px-2 py-0.5 bg-[#0F5D3A] hover:bg-[#22A06B] text-white rounded-lg text-xs font-bold shadow-2xs transition disabled:opacity-40"
+                              >
+                                +10
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleStartExactEdit(item)}
+                              disabled={Boolean(updatingId)}
+                              aria-label={`Set exact stock for ${item.name}`}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white border border-gray-200 hover:border-[#0F5D3A] hover:text-[#0F5D3A] text-gray-700 rounded-xl text-xs font-bold transition disabled:opacity-40"
+                            >
+                              <Pencil size={12} />
+                              <span>Set Qty</span>
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );

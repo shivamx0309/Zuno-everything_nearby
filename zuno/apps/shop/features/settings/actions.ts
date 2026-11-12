@@ -12,6 +12,7 @@ export async function getShopSettingsAction(): Promise<{
     pincode: string;
     phone: string;
     isActive: boolean;
+    isDeliveryAvailable: boolean;
     approvalStatus: string;
   };
   pendingCount: number;
@@ -23,7 +24,7 @@ export async function getShopSettingsAction(): Promise<{
   // 1. Fetch shop info
   const { data: shopRow } = await supabase
     .from("shops")
-    .select("id, name, locality, pincode, phone, is_active, approval_status")
+    .select("id, name, locality, pincode, phone, is_active, is_delivery_available, approval_status")
     .eq("id", shopId)
     .single();
 
@@ -34,6 +35,7 @@ export async function getShopSettingsAction(): Promise<{
     pincode: shopRow?.pincode || "231217",
     phone: shopRow?.phone || "",
     isActive: Boolean(shopRow?.is_active ?? true),
+    isDeliveryAvailable: Boolean(shopRow?.is_delivery_available ?? true),
     approvalStatus: shopRow?.approval_status || "APPROVED",
   };
 
@@ -65,5 +67,40 @@ export async function toggleStoreActiveSettingAction(isActive: boolean): Promise
 
   revalidatePath("/dashboard");
   revalidatePath("/settings");
+  revalidatePath("/shop");
   return { success: true };
+}
+
+export async function toggleDeliveryAvailabilitySettingAction(
+  isDeliveryAvailable: boolean
+): Promise<{ success: boolean; isDeliveryAvailable: boolean; message: string }> {
+  if (typeof isDeliveryAvailable !== "boolean") {
+    throw new Error("Invalid delivery availability value.");
+  }
+
+  const auth = await requireApprovedShopkeeper();
+  const supabase = createServerSupabaseClient();
+
+  const { error } = await supabase
+    .from("shops")
+    .update({
+      is_delivery_available: isDeliveryAvailable,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", auth.shopId);
+
+  if (error) {
+    throw new Error(`Failed to update delivery availability: ${error.message}`);
+  }
+
+  revalidatePath("/dashboard");
+  revalidatePath("/settings");
+  revalidatePath("/shop");
+  return {
+    success: true,
+    isDeliveryAvailable,
+    message: isDeliveryAvailable
+      ? "Delivery enabled."
+      : "Delivery paused (storefront remains visible when online).",
+  };
 }

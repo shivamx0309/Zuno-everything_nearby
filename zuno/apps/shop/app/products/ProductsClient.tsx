@@ -8,8 +8,11 @@ import {
   Package,
   PackageOpen,
   Check,
+  CheckCircle2,
+  Clock,
   X,
   Pencil,
+  Trash2,
   Sparkles,
   Layers,
   Apple,
@@ -19,23 +22,28 @@ import {
   Cookie,
   AlertCircle,
   HelpCircle,
-  ArrowLeft,
-  Store,
-  Tag,
 } from "lucide-react";
 import ShopLayoutShell from "../../components/ShopLayoutShell";
+import ConfirmActionDialog from "../../components/ConfirmActionDialog";
 import {
   ShopProductItem,
   CatalogProductItem,
   CategoryItem,
+  ProductRequestItem,
   ShopIdentityWithCategory,
   getShopProductsAction,
+  getShopProductRequestsAction,
   searchCatalogProductsAction,
   addCatalogProductToShopAction,
   updateShopProductAction,
   toggleProductAvailabilityAction,
   submitProductRequestAction,
+  removeShopProductAction,
 } from "../../features/products/api";
+import {
+  hasExistingListingPrice,
+  resolveCatalogListingDefaults,
+} from "../../lib/catalog-listing-defaults";
 
 function CategoryIcon({ categoryName, className = "w-5 h-5" }: { categoryName?: string; className?: string }) {
   const cat = (categoryName || "").toLowerCase();
@@ -66,13 +74,26 @@ export default function ProductsClient({
     categories: CategoryItem[];
     shopProducts: ShopProductItem[];
     catalogProducts: CatalogProductItem[];
+    productRequests: ProductRequestItem[];
+    productRequestsError?: string;
   };
 }) {
   const [data, setData] = useState(initialData);
+  const [activeTab, setActiveTab] = useState<"LISTINGS" | "REQUESTS">("LISTINGS");
   const [inventorySearch, setInventorySearch] = useState("");
   const [selectedFilterCategory, setSelectedFilterCategory] = useState("ALL");
   const [refreshing, setRefreshing] = useState(false);
+  const [requestsLoading, setRequestsLoading] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  // Remove listing confirmation dialog state
+  const [removeTarget, setRemoveTarget] = useState<ShopProductItem | null>(null);
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   // Modal states
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -120,9 +141,32 @@ export default function ProductsClient({
       setData(refreshed);
       setCatalogResults(refreshed.catalogProducts);
     } catch (err: any) {
-      alert(err?.message || "Failed to refresh products.");
+      setFeedback({
+        type: "error",
+        text: err?.message || "Failed to refresh products.",
+      });
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const refreshRequestsOnly = async () => {
+    try {
+      setRequestsLoading(true);
+      const res = await getShopProductRequestsAction();
+      setData((prev) => ({
+        ...prev,
+        productRequests: res.requests,
+        productRequestsError: res.error,
+      }));
+    } catch (err: any) {
+      setData((prev) => ({
+        ...prev,
+        productRequestsError:
+          err?.message || "Failed to load product requests.",
+      }));
+    } finally {
+      setRequestsLoading(false);
     }
   };
 
@@ -164,9 +208,10 @@ export default function ProductsClient({
 
   // Handle adding product to shop
   const handleConfirmAddListing = async () => {
-    if (!selectedCatalogProduct) return;
+    if (!selectedCatalogProduct || isSavingListing) return;
     setIsSavingListing(true);
     setListingSuccessMsg(null);
+    setFeedback(null);
     try {
       const res = await addCatalogProductToShopAction(
         selectedCatalogProduct.id,
@@ -180,7 +225,10 @@ export default function ProductsClient({
         setListingSuccessMsg(null);
       }, 1200);
     } catch (err: any) {
-      alert(err?.message || "Failed to add product to storefront.");
+      setFeedback({
+        type: "error",
+        text: err?.message || "Failed to add product to storefront.",
+      });
     } finally {
       setIsSavingListing(false);
     }
@@ -207,10 +255,11 @@ export default function ProductsClient({
 
       if (res.success) {
         setReqFeedback({ type: "success", message: res.message });
+        await refreshRequestsOnly();
         setTimeout(() => {
           setIsRequestModalOpen(false);
           setReqFeedback(null);
-        }, 1800);
+        }, 1400);
       } else {
         setReqFeedback({ type: "error", message: res.message });
       }
@@ -223,14 +272,23 @@ export default function ProductsClient({
 
   // Handle saving edit to existing shop product
   const handleSaveEdit = async () => {
-    if (!editingProduct) return;
+    if (!editingProduct || isSavingEdit) return;
     setIsSavingEdit(true);
+    setFeedback(null);
     try {
       await updateShopProductAction(editingProduct.id, editPrice, editStock);
+      const updatedName = editingProduct.name;
       setEditingProduct(null);
       await refreshProducts();
+      setFeedback({
+        type: "success",
+        text: `Updated listing for "${updatedName}".`,
+      });
     } catch (err: any) {
-      alert(err?.message || "Failed to update product.");
+      setFeedback({
+        type: "error",
+        text: err?.message || "Failed to update product.",
+      });
     } finally {
       setIsSavingEdit(false);
     }
@@ -239,13 +297,41 @@ export default function ProductsClient({
   // Handle toggling stock availability
   const handleToggleAvailability = async (item: ShopProductItem) => {
     setTogglingId(item.id);
+    setFeedback(null);
     try {
       await toggleProductAvailabilityAction(item.id, !item.isAvailable);
       await refreshProducts();
     } catch (err: any) {
-      alert(err?.message || "Failed to update availability.");
+      setFeedback({
+        type: "error",
+        text: err?.message || "Failed to update availability.",
+      });
     } finally {
       setTogglingId(null);
+    }
+  };
+
+  // Handle removing product from storefront (with confirmation)
+  const handleConfirmRemoveListing = async () => {
+    if (!removeTarget || isRemoving) return;
+    setIsRemoving(true);
+    setRemoveError(null);
+    setFeedback(null);
+    try {
+      const res = await removeShopProductAction(removeTarget.id);
+      setRemoveTarget(null);
+      setEditingProduct(null);
+      await refreshProducts();
+      setFeedback({
+        type: "success",
+        text: res.message,
+      });
+    } catch (err: any) {
+      setRemoveError(
+        err?.message || "Failed to remove product from your storefront."
+      );
+    } finally {
+      setIsRemoving(false);
     }
   };
 
@@ -300,6 +386,208 @@ export default function ProductsClient({
         </div>
       }
     >
+      {feedback && (
+        <div
+          role={feedback.type === "error" ? "alert" : "status"}
+          className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            feedback.type === "error"
+              ? "bg-red-50 border-red-200 text-red-800"
+              : "bg-emerald-50 border-emerald-200 text-emerald-800"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {feedback.type === "error" ? (
+              <AlertCircle size={16} className="text-red-600 flex-shrink-0" />
+            ) : (
+              <CheckCircle2 size={16} className="text-emerald-700 flex-shrink-0" />
+            )}
+            <span>{feedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            className="font-bold hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Primary Section Tabs: Storefront Listings vs Product Requests */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-2 shadow-sm flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2" role="tablist" aria-label="Catalog workspace tabs">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "LISTINGS"}
+            onClick={() => setActiveTab("LISTINGS")}
+            className={`px-4 py-2 rounded-xl text-xs font-extrabold transition ${
+              activeTab === "LISTINGS"
+                ? "bg-[#0F5D3A] text-white shadow-sm"
+                : "text-gray-600 hover:bg-gray-100"
+            }`}
+          >
+            My Storefront ({data.shopProducts.length})
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "REQUESTS"}
+            onClick={() => setActiveTab("REQUESTS")}
+            className={`px-4 py-2 rounded-xl text-xs font-extrabold transition inline-flex items-center gap-1.5 ${
+              activeTab === "REQUESTS"
+                ? "bg-[#0F5D3A] text-white shadow-sm"
+                : "text-gray-600 hover:bg-gray-100"
+            }`}
+          >
+            <Clock size={13} />
+            <span>Product Requests ({data.productRequests.length})</span>
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => handleOpenRequestModal("")}
+          className="px-3.5 py-2 text-xs font-bold text-[#0F5D3A] bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl transition inline-flex items-center gap-1.5"
+        >
+          <Plus size={14} />
+          <span>Request Missing Product</span>
+        </button>
+      </div>
+
+      {activeTab === "REQUESTS" ? (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+            <div>
+              <h3 className="font-black text-base text-[#17231D]">
+                Submitted Catalog Requests
+              </h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Track approval status for products you requested for {data.shop.name}.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={refreshRequestsOnly}
+              disabled={requestsLoading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl transition disabled:opacity-50"
+            >
+              <RefreshCw
+                size={13}
+                className={requestsLoading ? "animate-spin text-[#0F5D3A]" : ""}
+              />
+              <span>{requestsLoading ? "Refreshing..." : "Refresh Status"}</span>
+            </button>
+          </div>
+
+          {requestsLoading ? (
+            <div className="py-12 text-center space-y-2 text-gray-500">
+              <RefreshCw size={22} className="animate-spin mx-auto text-[#0F5D3A]" />
+              <p className="text-xs font-bold">Loading your product requests...</p>
+            </div>
+          ) : data.productRequestsError ? (
+            <div
+              role="alert"
+              className="bg-red-50 border border-red-200 rounded-2xl p-8 text-center space-y-3"
+            >
+              <h4 className="text-sm font-extrabold text-red-900">
+                Could Not Load Product Requests
+              </h4>
+              <p className="text-xs text-red-700 max-w-md mx-auto">
+                {data.productRequestsError}
+              </p>
+              <button
+                type="button"
+                onClick={refreshRequestsOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-xs font-bold rounded-xl transition"
+              >
+                <RefreshCw size={13} />
+                <span>Retry</span>
+              </button>
+            </div>
+          ) : data.productRequests.length === 0 ? (
+            <div className="py-12 text-center space-y-3">
+              <div className="w-12 h-12 mx-auto bg-emerald-50 text-[#0F5D3A] rounded-2xl flex items-center justify-center">
+                <PackageOpen size={24} strokeWidth={1.75} />
+              </div>
+              <h4 className="text-sm font-bold text-gray-800">
+                No product requests submitted yet
+              </h4>
+              <p className="text-xs text-gray-500 max-w-sm mx-auto">
+                If an item is missing from the shared ZUNO catalog, submit a request and track its approval status right here.
+              </p>
+              <button
+                type="button"
+                onClick={() => handleOpenRequestModal("")}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#0F5D3A] hover:bg-[#22A06B] text-white text-xs font-bold rounded-xl transition shadow-sm"
+              >
+                <Plus size={14} />
+                <span>Submit Product Request</span>
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {data.productRequests.map((req) => (
+                <div
+                  key={req.id}
+                  className="border border-gray-200 rounded-2xl p-4 bg-[#F8FAF6]/60 space-y-2.5"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h4 className="font-black text-sm text-[#17231D]">
+                        {req.productName}
+                        {req.brand ? (
+                          <span className="text-xs font-semibold text-gray-500 ml-1.5">
+                            ({req.brand})
+                          </span>
+                        ) : null}
+                      </h4>
+                      <p className="text-xs text-gray-500 font-medium mt-0.5">
+                        {req.categoryName} • Unit: {req.unit}
+                        {req.suggestedPrice !== null && req.suggestedPrice !== undefined
+                          ? ` • Suggested ₹${req.suggestedPrice}`
+                          : ""}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-[11px] text-gray-400 font-medium">
+                        {new Date(req.createdAt).toLocaleDateString("en-IN", {
+                          day: "numeric",
+                          month: "short",
+                          year: "numeric",
+                        })}
+                      </span>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold border ${
+                          req.status === "APPROVED"
+                            ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                            : req.status === "REJECTED"
+                            ? "bg-red-100 text-red-800 border-red-200"
+                            : "bg-amber-100 text-amber-800 border-amber-200"
+                        }`}
+                      >
+                        {req.status}
+                      </span>
+                    </div>
+                  </div>
+
+                  {req.status === "REJECTED" && (
+                    <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">
+                      <span className="font-extrabold">Rejection Reason: </span>
+                      <span>
+                        {req.rejectionReason ||
+                          "No reason specified by catalog administrator."}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
       {/* Category Pills & Inventory Search Bar */}
       <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
@@ -437,21 +725,39 @@ export default function ProductsClient({
                     Stock: {prod.stock} {prod.unit}s
                   </span>
                 </div>
-                <button
-                  onClick={() => {
-                    setEditingProduct(prod);
-                    setEditPrice(prod.price);
-                    setEditStock(prod.stock);
-                  }}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl transition"
-                >
-                  <Pencil size={12} />
-                  <span>Edit</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingProduct(prod);
+                      setEditPrice(prod.price);
+                      setEditStock(prod.stock);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl transition"
+                  >
+                    <Pencil size={12} />
+                    <span>Edit</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRemoveError(null);
+                      setRemoveTarget(prod);
+                    }}
+                    aria-label={`Remove ${prod.name} from storefront`}
+                    title="Remove from storefront"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition"
+                  >
+                    <Trash2 size={12} />
+                    <span>Remove</span>
+                  </button>
+                </div>
               </div>
             </div>
           ))}
         </div>
+      )}
+        </>
       )}
 
       {/* Edit Product Modal */}
@@ -502,20 +808,39 @@ export default function ProductsClient({
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+            <div className="flex items-center justify-between gap-2 pt-2 border-t border-gray-100">
               <button
-                onClick={() => setEditingProduct(null)}
-                className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-xl transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveEdit}
+                type="button"
+                onClick={() => {
+                  if (editingProduct) {
+                    setRemoveError(null);
+                    setRemoveTarget(editingProduct);
+                  }
+                }}
                 disabled={isSavingEdit}
-                className="px-4 py-2 text-xs font-bold text-white bg-[#0F5D3A] hover:bg-[#22A06B] rounded-xl transition disabled:opacity-50"
+                className="inline-flex items-center gap-1 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 border border-red-200 rounded-xl transition disabled:opacity-50"
               >
-                {isSavingEdit ? "Saving..." : "Save Changes"}
+                <Trash2 size={12} />
+                <span>Remove from Storefront</span>
               </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingProduct(null)}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-xl transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveEdit}
+                  disabled={isSavingEdit}
+                  className="px-4 py-2 text-xs font-bold text-white bg-[#0F5D3A] hover:bg-[#22A06B] rounded-xl transition disabled:opacity-50"
+                >
+                  {isSavingEdit ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -642,7 +967,7 @@ export default function ProductsClient({
                           : "No products currently available in this category"}
                       </h4>
                       <p className="text-xs text-gray-600 max-w-md mx-auto mt-1">
-                        ZUNO maintains a single shared product catalog for all shops. If a product isn't registered yet, submit a quick request to have it added.
+                        ZUNO maintains a single shared product catalog for all shops. If a product isn&apos;t registered yet, submit a quick request to have it added.
                       </p>
                     </div>
 
@@ -680,9 +1005,10 @@ export default function ProductsClient({
                           <button
                             key={p.id}
                             onClick={() => {
+                              const defaults = resolveCatalogListingDefaults(p);
                               setSelectedCatalogProduct(p);
-                              setSellingPrice(p.currentPrice || 50);
-                              setOpeningStock(p.currentStock || 20);
+                              setSellingPrice(defaults.price);
+                              setOpeningStock(defaults.stock);
                             }}
                             className={`p-3 rounded-2xl border text-left transition flex items-center justify-between text-xs ${
                               selectedCatalogProduct?.id === p.id
@@ -764,9 +1090,9 @@ export default function ProductsClient({
                               <p className="text-[11px] text-gray-500 font-medium">
                                 {cp.categoryName} • Unit: {cp.unit}
                               </p>
-                              {cp.isAlreadyListed && cp.currentPrice && (
+                              {cp.isAlreadyListed && hasExistingListingPrice(cp) && (
                                 <p className="text-[10px] text-emerald-800 font-bold mt-0.5">
-                                  Current price: ₹{cp.currentPrice} (Stock: {cp.currentStock})
+                                  Current price: ₹{cp.currentPrice} (Stock: {cp.currentStock ?? 0})
                                 </p>
                               )}
                             </div>
@@ -778,9 +1104,10 @@ export default function ProductsClient({
                             </span>
                             <button
                               onClick={() => {
+                                const defaults = resolveCatalogListingDefaults(cp);
                                 setSelectedCatalogProduct(cp);
-                                setSellingPrice(cp.currentPrice || 50);
-                                setOpeningStock(cp.currentStock || 20);
+                                setSellingPrice(defaults.price);
+                                setOpeningStock(defaults.stock);
                               }}
                               className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
                                 isSelected
@@ -1040,6 +1367,29 @@ export default function ProductsClient({
           </div>
         </div>
       )}
+
+      <ConfirmActionDialog
+        open={Boolean(removeTarget)}
+        title={`Remove ${removeTarget?.name || "Product"}?`}
+        subtitle={
+          removeTarget
+            ? `${removeTarget.categoryName} • ₹${removeTarget.price} / ${removeTarget.unit}`
+            : undefined
+        }
+        description="This will remove the product from your shop storefront so customers can no longer order it from your shop. Global ZUNO catalog products, other shops, and past order history will remain intact."
+        confirmLabel="Remove from Storefront"
+        confirmPendingLabel="Removing..."
+        cancelLabel="Keep Product"
+        isSubmitting={isRemoving}
+        error={removeError}
+        onConfirm={() => void handleConfirmRemoveListing()}
+        onCancel={() => {
+          if (!isRemoving) {
+            setRemoveTarget(null);
+            setRemoveError(null);
+          }
+        }}
+      />
     </ShopLayoutShell>
   );
 }

@@ -2,25 +2,34 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { getCurrentShopkeeper, ShopkeeperAccount } from "../../features/auth/api";
 
 export default function ShopStatusPage() {
+  const router = useRouter();
   const [shopkeeper, setShopkeeper] = useState<ShopkeeperAccount | null>(null);
   const [loading, setLoading] = useState(true);
+  const [newlyRegistered, setNewlyRegistered] = useState(false);
 
   useEffect(() => {
     async function load() {
-      let phoneParam: string | undefined;
       if (typeof window !== "undefined") {
         const urlParams = new URLSearchParams(window.location.search);
-        phoneParam = urlParams.get("phone") || undefined;
+        setNewlyRegistered(urlParams.get("registered") === "true");
       }
-      const s = await getCurrentShopkeeper(phoneParam);
+      const s = await getCurrentShopkeeper();
       setShopkeeper(s);
       setLoading(false);
     }
     load();
   }, []);
+
+  const handleSignOutAndReturn = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    router.push("/login");
+  };
 
   if (loading) {
     return (
@@ -30,7 +39,41 @@ export default function ShopStatusPage() {
     );
   }
 
-  const status = shopkeeper?.approvalStatus || "PENDING";
+  if (!shopkeeper) {
+    return (
+      <div className="min-h-screen bg-[#F8FAF6] flex flex-col justify-center items-center p-4 font-sans">
+        <div className="w-full max-w-md bg-white rounded-2xl border border-gray-200 shadow-sm p-8 text-center space-y-5">
+          <div className="mx-auto w-16 h-16 bg-[#EAF4E5] border border-[#0F5D3A] rounded-full flex items-center justify-center text-2xl text-[#0F5D3A] font-bold">
+            🔒
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-extrabold text-[#17231D]">
+              Sign In to Check Application Status
+            </h1>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              For your security and privacy, shop application status is visible only after signing in with your registered mobile number and password.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Link
+              href="/login?redirect=%2Fstatus"
+              className="block w-full py-3 bg-[#0F5D3A] hover:bg-[#0c4b2e] text-white rounded-xl text-sm font-extrabold transition shadow-sm"
+            >
+              Sign In to Check Status →
+            </Link>
+            <Link
+              href="/register"
+              className="block w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold transition"
+            >
+              Register a New Shop
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const status = shopkeeper.approvalStatus || "PENDING";
 
   return (
     <div className="min-h-screen bg-[#F8FAF6] flex flex-col justify-center items-center p-4 font-sans">
@@ -87,7 +130,7 @@ export default function ShopStatusPage() {
 
         {status === "APPROVED" || shopkeeper?.isApproved ? (
           <Link
-            href={shopkeeper?.phone ? `/dashboard?phone=${shopkeeper.phone.replace(/\D/g, "").slice(-10)}` : "/dashboard"}
+            href="/dashboard"
             className="block w-full py-3 bg-[#0F5D3A] hover:bg-[#0c4b2e] text-white rounded-xl text-sm font-extrabold transition shadow-sm"
           >
             Enter Shopkeeper Dashboard →
@@ -114,6 +157,11 @@ export default function ShopStatusPage() {
           </div>
         ) : (
           <div className="space-y-3">
+            {newlyRegistered && (
+              <div className="p-3 bg-[#EAF4E5] border border-[#22A06B]/30 text-[#0F5D3A] rounded-xl text-xs font-semibold leading-relaxed">
+                Application submitted! Your shop is pending Super Admin approval before dashboard access is unlocked.
+              </div>
+            )}
             <p className="text-[11px] text-gray-400">
               New shopkeeper registrations default to PENDING status and require Admin approval before live order processing.
             </p>
@@ -125,12 +173,13 @@ export default function ShopStatusPage() {
               >
                 🔄 Check Latest Approval Status
               </button>
-              <Link
-                href="/login"
+              <button
+                type="button"
+                onClick={handleSignOutAndReturn}
                 className="block w-full py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-xs font-bold transition"
               >
                 Back to Login / Sign Out
-              </Link>
+              </button>
             </div>
           </div>
         )}

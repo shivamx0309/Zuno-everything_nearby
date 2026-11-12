@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import ShopLayoutShell from "../../../components/ShopLayoutShell";
+import OrderDetailActions from "./OrderDetailActions";
 import { getShopOrdersAction } from "../../../features/orders/actions";
 
 export default async function OrderDetailPage({
@@ -10,7 +11,44 @@ export default async function OrderDetailPage({
 }: {
   params: { id: string };
 }) {
-  const { shop, orders, pendingCount } = await getShopOrdersAction();
+  const { shop, orders, pendingCount, error } = await getShopOrdersAction();
+
+  if (error) {
+    return (
+      <ShopLayoutShell
+        shop={shop}
+        pendingOrdersCount={pendingCount}
+        title="Order Details"
+        subtitle="Unable to load order information"
+        actions={
+          <Link
+            href="/orders"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-[#0F5D3A] bg-emerald-50 hover:bg-emerald-100 rounded-xl transition"
+          >
+            <ArrowLeft size={14} />
+            <span>Back to Orders</span>
+          </Link>
+        }
+      >
+        <div
+          role="alert"
+          className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center space-y-3"
+        >
+          <h2 className="text-sm font-extrabold text-red-900">
+            Could Not Load Order Details
+          </h2>
+          <p className="text-xs text-red-700">{error}</p>
+          <Link
+            href="/orders"
+            className="inline-block px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-xs font-bold rounded-xl transition"
+          >
+            Return to Orders
+          </Link>
+        </div>
+      </ShopLayoutShell>
+    );
+  }
+
   const order = orders.find((o) => o.id === params.id);
 
   if (!order) {
@@ -50,6 +88,13 @@ export default async function OrderDetailPage({
             </span>
           </div>
         </div>
+
+        <OrderDetailActions
+          orderId={order.id}
+          orderDisplayId={order.displayId}
+          customerName={order.customerName}
+          currentStatus={order.status}
+        />
 
         {/* Customer & Delivery */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

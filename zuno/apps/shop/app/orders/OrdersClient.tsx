@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
+import Link from "next/link";
 import {
   RefreshCw,
   Search,
@@ -11,15 +12,18 @@ import {
   Package,
   Boxes,
   CheckCircle2,
+  AlertCircle,
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
 import ShopLayoutShell from "../../components/ShopLayoutShell";
+import RejectOrderDialog from "../../components/RejectOrderDialog";
 import {
   ShopOrderDetail,
   getShopOrdersAction,
   updateShopOrderStatusAction,
 } from "../../features/orders/api";
+import { useShopOrdersRealtime } from "../../hooks/useShopOrdersRealtime";
 
 function getStatusBadgeClass(status: string) {
   switch (status) {
@@ -54,6 +58,7 @@ export default function OrdersClient({
     };
     orders: ShopOrderDetail[];
     pendingCount: number;
+    error?: string;
   };
 }) {
   const [data, setData] = useState(initialData);
@@ -62,26 +67,55 @@ export default function OrdersClient({
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [rejectTarget, setRejectTarget] = useState<ShopOrderDetail | null>(null);
+  const [rejectError, setRejectError] = useState<string | null>(null);
 
-  const refreshOrders = async () => {
+  const refreshOrders = useCallback(async () => {
     try {
       setRefreshing(true);
       const refreshed = await getShopOrdersAction();
       setData(refreshed);
     } catch (err: any) {
-      alert(err?.message || "Failed to refresh orders.");
+      setFeedback({
+        type: "error",
+        text: err?.message || "Failed to refresh orders.",
+      });
     } finally {
       setRefreshing(false);
     }
-  };
+  }, []);
+
+  const { status: realtimeStatus } = useShopOrdersRealtime(
+    data.shop.id,
+    refreshOrders
+  );
 
   const handleUpdateStatus = async (orderId: string, nextStatus: string) => {
+    if (updatingId) return;
     setUpdatingId(orderId);
+    setFeedback(null);
+    setRejectError(null);
     try {
-      await updateShopOrderStatusAction(orderId, nextStatus);
+      const res = await updateShopOrderStatusAction(orderId, nextStatus);
       await refreshOrders();
+      setFeedback({
+        type: "success",
+        text: res.message || `Order status updated to ${nextStatus}.`,
+      });
+      if (nextStatus === "REJECTED") {
+        setRejectTarget(null);
+      }
     } catch (err: any) {
-      alert(err?.message || `Failed to update order to ${nextStatus}.`);
+      const message = err?.message || `Failed to update order to ${nextStatus}.`;
+      if (nextStatus === "REJECTED" && rejectTarget?.id === orderId) {
+        setRejectError(message);
+      } else {
+        setFeedback({ type: "error", text: message });
+      }
     } finally {
       setUpdatingId(null);
     }
@@ -110,20 +144,57 @@ export default function OrdersClient({
       title="Orders Management"
       subtitle="Track, accept and fulfill customer orders in real time"
       actions={
-        <button
-          onClick={refreshOrders}
-          disabled={refreshing}
-          title="Refresh orders list"
-          aria-label="Refresh orders list"
-          className="p-2 text-gray-600 hover:text-[#0F5D3A] hover:bg-emerald-50 rounded-xl transition focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
-        >
-          <RefreshCw
-            size={18}
-            className={refreshing ? "animate-spin text-[#0F5D3A]" : ""}
-          />
-        </button>
+        <div className="flex items-center gap-2">
+          {realtimeStatus === "SUBSCRIBED" && (
+            <span
+              title="Real-time order updates connected"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-[#0F5D3A]"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-[#22A06B] animate-pulse" />
+              <span>Live</span>
+            </span>
+          )}
+          <button
+            onClick={refreshOrders}
+            disabled={refreshing}
+            title="Refresh orders list"
+            aria-label="Refresh orders list"
+            className="p-2 text-gray-600 hover:text-[#0F5D3A] hover:bg-emerald-50 rounded-xl transition focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
+          >
+            <RefreshCw
+              size={18}
+              className={refreshing ? "animate-spin text-[#0F5D3A]" : ""}
+            />
+          </button>
+        </div>
       }
     >
+      {feedback && (
+        <div
+          role={feedback.type === "error" ? "alert" : "status"}
+          className={`p-3.5 rounded-2xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            feedback.type === "error"
+              ? "bg-red-50 border-red-200 text-red-800"
+              : "bg-emerald-50 border-emerald-200 text-emerald-800"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {feedback.type === "error" ? (
+              <AlertCircle size={16} className="text-red-600 flex-shrink-0" />
+            ) : (
+              <CheckCircle2 size={16} className="text-emerald-700 flex-shrink-0" />
+            )}
+            <span>{feedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            className="font-bold hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Filter Tabs & Search */}
       <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
@@ -133,7 +204,9 @@ export default function OrdersClient({
             { id: "ACCEPTED", label: "Accepted" },
             { id: "PREPARING", label: "Preparing" },
             { id: "READY_FOR_PICKUP", label: "Ready" },
+            { id: "OUT_FOR_DELIVERY", label: "Out for Delivery" },
             { id: "DELIVERED", label: "Delivered" },
+            { id: "REJECTED", label: "Rejected" },
             { id: "CANCELLED", label: "Cancelled" },
           ].map((tab) => (
             <button
@@ -162,8 +235,29 @@ export default function OrdersClient({
         </div>
       </div>
 
-      {/* Orders List / Cards */}
-      {filteredOrders.length === 0 ? (
+      {/* Explicit Error State (never masked as empty list) */}
+      {data.error ? (
+        <div
+          role="alert"
+          className="bg-red-50 border border-red-200 rounded-2xl p-8 text-center space-y-3"
+        >
+          <h3 className="text-sm font-extrabold text-red-900">
+            Could Not Load Store Orders
+          </h3>
+          <p className="text-xs text-red-700 max-w-md mx-auto leading-relaxed">
+            {data.error}
+          </p>
+          <button
+            type="button"
+            onClick={refreshOrders}
+            disabled={refreshing}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-xs font-bold rounded-xl transition disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+            <span>{refreshing ? "Retrying..." : "Retry Loading Orders"}</span>
+          </button>
+        </div>
+      ) : filteredOrders.length === 0 ? (
         <div className="bg-white border border-gray-200 rounded-2xl p-12 text-center space-y-3">
           <div className="w-12 h-12 mx-auto bg-emerald-50 text-[#0F5D3A] rounded-2xl flex items-center justify-center">
             <PackageOpen size={26} strokeWidth={1.75} />
@@ -303,19 +397,32 @@ export default function OrdersClient({
                 )}
 
                 {/* Action Buttons based on Status */}
-                <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-gray-100">
+                  <Link
+                    href={`/orders/${order.id}`}
+                    className="text-xs font-bold text-[#0F5D3A] hover:underline"
+                  >
+                    View Order Details →
+                  </Link>
+
+                  <div className="flex items-center justify-end gap-2">
                   {order.status === "PLACED" && (
                     <>
                       <button
-                        onClick={() => handleUpdateStatus(order.id, "CANCELLED")}
-                        disabled={isUpdating}
+                        type="button"
+                        onClick={() => {
+                          setRejectError(null);
+                          setRejectTarget(order);
+                        }}
+                        disabled={isUpdating || Boolean(updatingId)}
                         className="px-3 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50 rounded-xl transition border border-red-200 disabled:opacity-50"
                       >
                         Reject Order
                       </button>
                       <button
+                        type="button"
                         onClick={() => handleUpdateStatus(order.id, "ACCEPTED")}
-                        disabled={isUpdating}
+                        disabled={isUpdating || Boolean(updatingId)}
                         className="inline-flex items-center gap-1 px-4 py-1.5 text-xs font-bold text-white bg-[#0F5D3A] hover:bg-[#22A06B] rounded-xl transition shadow-sm disabled:opacity-50"
                       >
                         <Check size={14} strokeWidth={2.2} />
@@ -326,8 +433,9 @@ export default function OrdersClient({
 
                   {order.status === "ACCEPTED" && (
                     <button
+                      type="button"
                       onClick={() => handleUpdateStatus(order.id, "PREPARING")}
-                      disabled={isUpdating}
+                      disabled={isUpdating || Boolean(updatingId)}
                       className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition shadow-sm disabled:opacity-50"
                     >
                       <Package size={14} strokeWidth={2} />
@@ -337,8 +445,9 @@ export default function OrdersClient({
 
                   {order.status === "PREPARING" && (
                     <button
+                      type="button"
                       onClick={() => handleUpdateStatus(order.id, "READY_FOR_PICKUP")}
-                      disabled={isUpdating}
+                      disabled={isUpdating || Boolean(updatingId)}
                       className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 rounded-xl transition shadow-sm disabled:opacity-50"
                     >
                       <Boxes size={14} strokeWidth={2} />
@@ -358,12 +467,32 @@ export default function OrdersClient({
                       <span>Order successfully delivered</span>
                     </span>
                   )}
+                  </div>
                 </div>
               </div>
             );
           })}
         </div>
       )}
+
+      <RejectOrderDialog
+        open={Boolean(rejectTarget)}
+        orderDisplayId={rejectTarget?.displayId || ""}
+        customerName={rejectTarget?.customerName}
+        isSubmitting={Boolean(rejectTarget && updatingId === rejectTarget.id)}
+        error={rejectError}
+        onConfirm={() => {
+          if (rejectTarget) {
+            void handleUpdateStatus(rejectTarget.id, "REJECTED");
+          }
+        }}
+        onCancel={() => {
+          if (!updatingId) {
+            setRejectTarget(null);
+            setRejectError(null);
+          }
+        }}
+      />
     </ShopLayoutShell>
   );
 }

@@ -196,11 +196,22 @@ export default function HomeScreen() {
   }, [search, products]);
 
   const handleAddToCart = (product: ProductData) => {
+    if (!product.inStock || !product.shop?.canOrder) return;
+
     addToCartStore({
       id: product.id,
+      shopProductId: product.shopProductId || product.id,
+      productId: product.productId,
       name: product.name,
       price: product.price,
       unit: product.unit,
+      shopId: product.shopId,
+      shopName: product.shopName,
+      shopDistance: product.shop?.distance,
+      stock: product.stock,
+      image_url: product.image_url,
+      emoji: product.emoji,
+      color: product.color,
     });
     analytics.trackAddToCart({
       productId: product.id,
@@ -210,6 +221,7 @@ export default function HomeScreen() {
     });
     posthog?.capture("product_added_to_cart", {
       product_id: product.id,
+      shop_id: product.shopId,
       unit_price: product.price,
       currency: "INR",
     });
@@ -424,9 +436,22 @@ export default function HomeScreen() {
                     <Text style={styles.shopEmoji}>{shop.emoji || "🏪"}</Text>
                   )}
                   <View style={styles.openBadge}>
-                    <View style={styles.openDot} />
-                    <Text style={styles.openText}>Nearby</Text>
+                    <View
+                      style={[
+                        styles.openDot,
+                        shop.isOpenNow === false && styles.closedDot,
+                      ]}
+                    />
+                    <Text style={styles.openText}>
+                      {shop.availability?.openStatusLabel ||
+                        (shop.isOpenNow === false ? "Closed" : "Open")}
+                    </Text>
                   </View>
+                  {shop.isDeliveryAvailable === false && (
+                    <View style={styles.deliveryPausedBadge}>
+                      <Text style={styles.deliveryPausedText}>Delivery Paused</Text>
+                    </View>
+                  )}
                 </View>
 
                 <Text style={styles.shopName} numberOfLines={1}>
@@ -439,6 +464,19 @@ export default function HomeScreen() {
                   <Text style={styles.rating}>★ {shop.rating}</Text>
                   <Text style={styles.distance}>· {shop.distance}</Text>
                 </View>
+                <Text
+                  style={[
+                    styles.shopDeliveryMeta,
+                    shop.isDeliveryAvailable === false &&
+                      styles.shopDeliveryMetaPaused,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {shop.deliveryStatusLabel ||
+                    (shop.isDeliveryAvailable === false
+                      ? "Delivery Temporarily Paused"
+                      : "Delivery Available")}
+                </Text>
               </Pressable>
             ))}
           </ScrollView>
@@ -478,12 +516,22 @@ export default function HomeScreen() {
                   <Text style={styles.productName} numberOfLines={1}>
                     {product.name}
                   </Text>
-                  <Text style={styles.productUnit}>{product.unit}</Text>
+                  <Text style={styles.productUnit} numberOfLines={1}>
+                    {product.unit} · {product.shopName}
+                  </Text>
 
                   <View style={styles.productBottom}>
                     <Text style={styles.productPrice}>₹{product.price}</Text>
 
-                    {currentQty > 0 ? (
+                    {!product.inStock || !product.shop?.canOrder ? (
+                      <Text style={{ fontSize: 10, fontWeight: "700", color: "#B45309" }}>
+                        {!product.inStock
+                          ? "Out of stock"
+                          : !product.shop?.isOpen
+                          ? "Closed"
+                          : "Paused"}
+                      </Text>
+                    ) : currentQty > 0 ? (
                       <View style={styles.quantityControl}>
                         <Pressable
                           onPress={() => handleRemoveFromCart(product.id)}
@@ -975,6 +1023,32 @@ const styles = StyleSheet.create({
     height: 5,
     borderRadius: 2.5,
     backgroundColor: "#22A06B",
+  },
+  closedDot: {
+    backgroundColor: "#DC2626",
+  },
+  deliveryPausedBadge: {
+    position: "absolute",
+    bottom: 6,
+    left: 6,
+    backgroundColor: "rgba(254, 243, 199, 0.95)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  deliveryPausedText: {
+    fontSize: 8.5,
+    fontWeight: "800",
+    color: "#92400E",
+  },
+  shopDeliveryMeta: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#0F5D3A",
+    marginTop: 4,
+  },
+  shopDeliveryMetaPaused: {
+    color: "#B45309",
   },
   openText: {
     fontSize: 9,

@@ -168,10 +168,10 @@ export async function getDeliveryOrdersList(
 
       if (!error && data && data.length > 0) {
         remoteList = data.map((d: any) => {
-          const orderObj = d.orders || {};
-          const shopObj = orderObj.shops || {};
-          const addrObj = orderObj.addresses || {};
-          const itemsList: DeliveryItem[] = (orderObj.order_items || []).map((it: any) => ({
+          const orderObj = d.orders || null;
+          const shopObj = orderObj?.shops || null;
+          const addrObj = orderObj?.addresses || null;
+          const itemsList: DeliveryItem[] = (orderObj?.order_items || []).map((it: any) => ({
             id: it.id,
             name: it.product_name_snapshot,
             unit: "1 pack",
@@ -181,29 +181,39 @@ export async function getDeliveryOrdersList(
           }));
 
           const delStatus = (d.status as DeliveryStatus) || DeliveryStatus.UNASSIGNED;
-          const ordStatus = (orderObj.status as OrderStatus) || OrderStatus.PLACED;
+          const ordStatus =
+            (orderObj?.status as OrderStatus) ||
+            (delStatus === DeliveryStatus.UNASSIGNED
+              ? OrderStatus.READY_FOR_PICKUP
+              : OrderStatus.PLACED);
+          const pickupFallbackName =
+            typeof d.pickup_address === "string" && d.pickup_address.includes(",")
+              ? d.pickup_address.split(",")[0].trim()
+              : "ZUNO Partner Store";
 
           return {
             id: d.id,
             orderId: d.order_id,
             orderNumber: `ZUNO-${d.order_id.slice(0, 6).toUpperCase()}`,
-            shopId: orderObj.shop_id || "shop-1",
-            shopName: shopObj.name || "Eureka Fresh Mart",
-            shopCategory: "Fruits & Vegetables",
-            shopPhone: shopObj.phone || "+91 98765 11111",
-            pickupAddress: d.pickup_address || "Main Market, Renukoot - 231217",
+            shopId: orderObj?.shop_id || "",
+            shopName: shopObj?.name || pickupFallbackName,
+            shopCategory: "Local Store",
+            shopPhone: shopObj?.phone || "",
+            pickupAddress: d.pickup_address || "Pickup address unavailable",
             customerName: "Customer",
-            customerPhone: "+91 98765 43210",
-            deliveryAddress: d.dropoff_address || `${addrObj.line1 || "Colony"}, Renukoot - 231217`,
-            deliveryArea: addrObj.label || "Renukoot Area",
+            customerPhone: "",
+            deliveryAddress:
+              d.dropoff_address ||
+              (addrObj?.line1 ? `${addrObj.line1}, Renukoot - 231217` : "Drop-off address unavailable"),
+            deliveryArea: addrObj?.label || "Renukoot Area",
             status: delStatus,
             orderStatus: ordStatus,
             itemsCount: itemsList.reduce((acc, item) => acc + item.quantity, 0),
             items: itemsList,
-            subtotal: Number(orderObj.subtotal || 100),
-            deliveryFee: Number(orderObj.delivery_fee || 25),
-            total: Number(orderObj.total || 125),
-            payout: Number(d.payout || 45),
+            subtotal: Number(orderObj?.subtotal || 0),
+            deliveryFee: Number(orderObj?.delivery_fee || 0),
+            total: Number(orderObj?.total || 0),
+            payout: Number(d.payout || 0),
             distanceKm: 2.5,
             createdAt: d.created_at,
             pickedUpAt: d.picked_up_at,

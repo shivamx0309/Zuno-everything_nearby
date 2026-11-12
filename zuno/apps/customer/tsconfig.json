@@ -4,7 +4,12 @@
     "strict": true,
     "skipLibCheck": true,
     "paths": {
-      "@/*": ["./*"]
+      "@/*": [
+        "./*"
+      ],
+      "@zuno/types": [
+        "../../packages/types/src/index.ts"
+      ]
     }
   }
 }

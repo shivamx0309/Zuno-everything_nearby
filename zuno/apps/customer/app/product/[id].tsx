@@ -106,14 +106,23 @@ export default function ProductDetailsScreen() {
   const activeUnit = selectedVariant ? selectedVariant.label : product?.unit || "1 kg";
 
   const handleAddToCart = () => {
-    if (!product || !product.inStock) return;
+    if (!product || !product.inStock || !product.shop?.canOrder) return;
 
     for (let i = 0; i < quantity; i++) {
       addToCartStore({
         id: product.id,
-        name: `${product.name} (${activeUnit})`,
+        shopProductId: product.shopProductId || product.id,
+        productId: product.productId,
+        name: product.name,
         price: activePrice,
         unit: activeUnit,
+        shopId: product.shopId,
+        shopName: product.shopName,
+        shopDistance: product.shop?.distance,
+        stock: product.stock,
+        image_url: product.image_url,
+        emoji: product.emoji,
+        color: product.color,
       });
     }
 
@@ -126,6 +135,7 @@ export default function ProductDetailsScreen() {
 
     posthog?.capture("add_to_cart_succeeded", {
       product_id: product.id,
+      shop_id: product.shopId,
       product_name: product.name,
       price: activePrice,
       quantity,
@@ -290,22 +300,31 @@ export default function ProductDetailsScreen() {
 
             {/* Shop Information Card */}
             {product.shop && (
-              <View style={styles.shopCard}>
+              <Pressable
+                style={styles.shopCard}
+                onPress={() => router.push(`/shop/${product.shop.id}` as never)}
+              >
                 <View style={styles.shopIconBox}>
                   <Store size={20} color={GREEN} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.shopLabel}>Shop</Text>
+                  <Text style={styles.shopLabel}>Sold by Shop</Text>
                   <Text style={styles.shopTitle}>{product.shop.name}</Text>
                   <View style={styles.shopMetaRow}>
-                    <View style={styles.greenDot} />
+                    <View
+                      style={[
+                        styles.greenDot,
+                        !product.shop.isOpen && { backgroundColor: "#DC2626" },
+                      ]}
+                    />
                     <Text style={styles.shopStatusText}>
-                      {product.shop.isOpen ? "Open" : "Closed"} · {product.shop.distance}
+                      {product.shop.isOpen ? "Open" : "Closed"} ·{" "}
+                      {product.shop.deliveryStatusLabel} · {product.shop.distance}
                     </Text>
                   </View>
                 </View>
                 <ChevronRight size={18} color={MUTED} />
-              </View>
+              </Pressable>
             )}
 
             {/* Product Details Specs Table */}
@@ -422,12 +441,21 @@ export default function ProductDetailsScreen() {
             </View>
 
             <Pressable
-              style={[styles.addToCartBtn, !product.inStock && styles.btnDisabled]}
+              style={[
+                styles.addToCartBtn,
+                (!product.inStock || !product.shop.canOrder) && styles.btnDisabled,
+              ]}
               onPress={handleAddToCart}
-              disabled={!product.inStock}
+              disabled={!product.inStock || !product.shop.canOrder}
             >
               <Text style={styles.addToCartText}>
-                {product.inStock ? "Add to Cart" : "Out of Stock"}
+                {!product.inStock
+                  ? "Out of Stock"
+                  : !product.shop.isOpen
+                  ? "Shop Closed"
+                  : !product.shop.isDeliveryAvailable
+                  ? "Delivery Paused"
+                  : "Add to Cart"}
               </Text>
             </Pressable>
           </View>

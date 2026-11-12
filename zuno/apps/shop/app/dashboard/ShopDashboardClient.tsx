@@ -1,12 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import Link from "next/link";
 import {
   IndianRupee,
   ShoppingBag,
   Clock,
-  Star,
   Plus,
   Boxes,
   ClipboardList,
@@ -17,6 +16,7 @@ import {
   Search,
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
 } from "lucide-react";
 import ShopLayoutShell from "../../components/ShopLayoutShell";
@@ -24,6 +24,7 @@ import {
   getShopDashboardDataAction,
   DashboardData,
 } from "../../features/dashboard/api";
+import { useShopOrdersRealtime } from "../../hooks/useShopOrdersRealtime";
 
 function getStatusBadgeClass(status: string) {
   switch (status) {
@@ -59,21 +60,29 @@ export default function ShopDashboardClient({
 }) {
   const [data, setData] = useState<DashboardData>(initialData);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialData.error || null);
   const [searchTerm, setSearchTerm] = useState("");
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       const res = await getShopDashboardDataAction();
       setData(res);
+      if (res.error) {
+        setError(res.error);
+      }
     } catch (err: any) {
       setError(err?.message || "Failed to load dashboard data.");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const { status: realtimeStatus } = useShopOrdersRealtime(
+    data.shop.id,
+    loadData
+  );
 
   const filteredOrders = (data.recentOrders || []).filter(
     (order) =>
@@ -89,21 +98,32 @@ export default function ShopDashboardClient({
       title="Shop Dashboard"
       subtitle="Manage your storefront, inventory and live customer orders in Renukoot"
       actions={
-        <button
-          onClick={loadData}
-          disabled={loading}
-          title="Refresh live dashboard data"
-          aria-label="Refresh live dashboard data"
-          className="p-2 text-gray-600 hover:text-[#0F5D3A] hover:bg-emerald-50 rounded-xl transition focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
-        >
-          <RefreshCw
-            size={18}
-            strokeWidth={2}
-            className={`text-gray-600 hover:text-[#0F5D3A] transition-transform ${
-              loading ? "animate-spin" : ""
-            }`}
-          />
-        </button>
+        <div className="flex items-center gap-2">
+          {realtimeStatus === "SUBSCRIBED" && (
+            <span
+              title="Real-time order updates connected"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-[#0F5D3A]"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-[#22A06B] animate-pulse" />
+              <span>Live</span>
+            </span>
+          )}
+          <button
+            onClick={loadData}
+            disabled={loading}
+            title="Refresh live dashboard data"
+            aria-label="Refresh live dashboard data"
+            className="p-2 text-gray-600 hover:text-[#0F5D3A] hover:bg-emerald-50 rounded-xl transition focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
+          >
+            <RefreshCw
+              size={18}
+              strokeWidth={2}
+              className={`text-gray-600 hover:text-[#0F5D3A] transition-transform ${
+                loading ? "animate-spin" : ""
+              }`}
+            />
+          </button>
+        </div>
       }
     >
       {error && (
@@ -145,9 +165,9 @@ export default function ShopDashboardClient({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
         {[
           {
-            title: "Today's Revenue",
+            title: "Today's Merchandise",
             value: `₹${data.metrics.todayRevenue.toLocaleString("en-IN")}`,
-            change: "Confirmed orders today",
+            change: "Excl. delivery fees",
             isPositive: true,
             icon: IndianRupee,
             iconBg: "bg-emerald-50 text-[#0F5D3A] border-emerald-100",
@@ -172,20 +192,30 @@ export default function ShopDashboardClient({
             iconBg: "bg-amber-50 text-amber-700 border-amber-100",
           },
           {
-            title: "Store Rating",
-            value: `${data.metrics.ratingDisplay} ★`,
-            change: "Reviews not in schema",
-            isPositive: true,
-            icon: Star,
-            iconBg: "bg-purple-50 text-purple-700 border-purple-100",
+            title: "Low & Out of Stock",
+            value: `${data.metrics.lowStockCount + data.metrics.outOfStockCount} Items`,
+            change:
+              data.metrics.totalListedProductsCount === 0
+                ? "No products listed yet"
+                : data.metrics.lowStockCount + data.metrics.outOfStockCount === 0
+                ? "All listed stock healthy"
+                : `${data.metrics.outOfStockCount} out of stock • ${data.metrics.lowStockCount} low (<10)`,
+            isPositive:
+              data.metrics.lowStockCount === 0 &&
+              data.metrics.outOfStockCount === 0,
+            icon: AlertTriangle,
+            iconBg:
+              data.metrics.outOfStockCount > 0
+                ? "bg-red-50 text-red-700 border-red-100"
+                : data.metrics.lowStockCount > 0
+                ? "bg-amber-50 text-amber-700 border-amber-100"
+                : "bg-emerald-50 text-[#0F5D3A] border-emerald-100",
+            href: "/inventory",
           },
         ].map((stat, idx) => {
           const Icon = stat.icon;
-          return (
-            <div
-              key={idx}
-              className="bg-white border border-gray-200/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
-            >
+          const cardContent = (
+            <>
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">
                   {stat.title}
@@ -209,6 +239,28 @@ export default function ShopDashboardClient({
                   <span>{stat.change}</span>
                 </p>
               </div>
+            </>
+          );
+
+          if ("href" in stat && stat.href) {
+            return (
+              <Link
+                key={idx}
+                href={stat.href}
+                aria-label={`${stat.title} — Open Inventory`}
+                className="bg-white border border-gray-200/80 hover:border-[#22A06B] rounded-2xl p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
+              >
+                {cardContent}
+              </Link>
+            );
+          }
+
+          return (
+            <div
+              key={idx}
+              className="bg-white border border-gray-200/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
+            >
+              {cardContent}
             </div>
           );
         })}
@@ -307,7 +359,7 @@ export default function ShopDashboardClient({
                       </td>
                       <td className="py-3 px-3 text-right">
                         <Link
-                          href="/orders"
+                          href={`/orders/${order.id}`}
                           className="inline-block bg-[#0F5D3A] hover:bg-[#22A06B] text-white text-[11px] font-bold px-3 py-1.5 rounded-lg transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-[#A7D56B]"
                         >
                           Manage

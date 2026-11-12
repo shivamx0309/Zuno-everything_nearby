@@ -12,7 +12,8 @@ import {
   ActivityIndicator,
   Modal,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { supabase } from "@/lib/supabase";
 import {
   ArrowLeft,
   MapPin,
@@ -32,7 +33,10 @@ import {
 import { posthog } from "@/lib/posthog";
 import { analytics } from "@/lib/analytics";
 import { useCartStore } from "@/store/cartStore";
-import { getCustomerAddresses } from "@/features/location/api";
+import {
+  getCustomerAddresses,
+  saveCustomerAddress,
+} from "@/features/location/api";
 import {
   calculateCheckoutQuote,
   placeOrder,
@@ -51,15 +55,34 @@ type PaymentMethod = "COD" | "UPI" | "ONLINE";
 
 export default function CheckoutScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ shopId?: string }>();
 
-  // Cart State
+  // Cart State — strictly one shop per order
   const cartItemsObj = useCartStore((state) => state.items);
-  const cartItemsList = useMemo(() => Object.values(cartItemsObj), [cartItemsObj]);
-  const cartCount = useCartStore((state) => state.getCartCount());
-  const clearCart = useCartStore((state) => state.clearCart);
+  const activeCheckoutShopId = useCartStore(
+    (state) => state.activeCheckoutShopId
+  );
+  const clearShopCart = useCartStore((state) => state.clearShopCart);
+
+  const targetShopId = useMemo(() => {
+    const paramShopId = params.shopId ? String(params.shopId) : null;
+    if (paramShopId) return paramShopId;
+    if (activeCheckoutShopId) return activeCheckoutShopId;
+    const first = Object.values(cartItemsObj)[0];
+    return first?.shopId || null;
+  }, [params.shopId, activeCheckoutShopId, cartItemsObj]);
+
+  const cartItemsList = useMemo(
+    () =>
+      targetShopId
+        ? Object.values(cartItemsObj).filter((item) => item.shopId === targetShopId)
+        : [],
+    [cartItemsObj, targetShopId]
+  );
 
   // Steps & Selection State
   const [currentStep, setCurrentStep] = useState<CheckoutStep>(1);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [selectedAddressId, setSelectedAddressId] = useState<string>("");
   const [deliveryInstructions, setDeliveryInstructions] = useState("");
@@ -85,52 +108,53 @@ export default function CheckoutScreen() {
   const [quote, setQuote] = useState<CheckoutQuoteResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [orderError, setOrderError] = useState<string | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string>("");
   const [placedOrderNumber, setPlacedOrderNumber] = useState<string>("");
 
+  const idempotencyKey = useMemo(() => {
+    const itemsSig = cartItemsList
+      .map((i) => `${i.shopProductId || i.id}:${i.quantity}`)
+      .sort()
+      .join("|");
+    return `chk-${targetShopId || "none"}-${selectedAddressId || "none"}-${itemsSig}`.slice(
+      0,
+      120
+    );
+  }, [targetShopId, selectedAddressId, cartItemsList]);
+
   useEffect(() => {
-    analytics.trackCheckoutStarted?.({ cartTotal: 0, cartCount });
-    posthog?.capture("checkout_viewed", { cart_count: cartCount });
+    analytics.trackCheckoutStarted?.({
+      cartTotal: 0,
+      cartCount: cartItemsList.reduce((s, i) => s + i.quantity, 0),
+    });
+    posthog?.capture("checkout_viewed", {
+      shop_id: targetShopId,
+      item_count: cartItemsList.length,
+    });
 
     async function initCheckout() {
       setLoading(true);
       try {
-        const savedAddresses = await getCustomerAddresses();
-        if (savedAddresses.length > 0) {
-          setAddresses(savedAddresses);
-          const defaultAddr = savedAddresses.find((a) => a.is_default) || savedAddresses[0];
-          setSelectedAddressId(defaultAddr.id);
+        const { data: userData } = await supabase.auth.getUser();
+        const authed = Boolean(userData?.user);
+        setIsAuthenticated(authed);
+
+        if (authed) {
+          const savedAddresses = await getCustomerAddresses();
+          if (savedAddresses.length > 0) {
+            setAddresses(savedAddresses);
+            const defaultAddr =
+              savedAddresses.find((a) => a.is_default) || savedAddresses[0];
+            setSelectedAddressId(defaultAddr.id);
+          } else {
+            setAddresses([]);
+            setSelectedAddressId("");
+          }
         } else {
-          // Default fallback addresses for 1-click selection in Renukoot
-          const fallbackList: any[] = [
-            {
-              id: "addr-1",
-              label: "Home",
-              recipient_name: "Customer",
-              phone_number: "+91 98765 43210",
-              line1: "Near Railway Station, Renukoot",
-              line2: "Sector 4",
-              city: "Renukoot",
-              state: "Uttar Pradesh",
-              pincode: "231217",
-              is_default: true,
-            },
-            {
-              id: "addr-2",
-              label: "Work / Office",
-              recipient_name: "Customer",
-              phone_number: "+91 98765 43210",
-              line1: "Hindalco Colony, Main Road",
-              line2: "Gate No. 2",
-              city: "Renukoot",
-              state: "Uttar Pradesh",
-              pincode: "231217",
-              is_default: false,
-            },
-          ];
-          setAddresses(fallbackList);
-          setSelectedAddressId("addr-1");
+          setAddresses([]);
+          setSelectedAddressId("");
         }
       } catch (err) {
         console.error("Error initializing checkout:", err);
@@ -140,7 +164,7 @@ export default function CheckoutScreen() {
     }
 
     initCheckout();
-  }, []);
+  }, [targetShopId]);
 
   const handleOpenEditAddress = (addr: any) => {
     setEditingAddressId(addr.id);
@@ -172,28 +196,35 @@ export default function CheckoutScreen() {
     setShowAddressModal(true);
   };
 
-  const handleSaveAddress = () => {
-    if (!addressForm.line1.trim()) return;
+  const handleSaveAddress = async () => {
+    if (!addressForm.line1.trim() || !isAuthenticated) return;
 
-    if (editingAddressId) {
-      setAddresses((prev) =>
-        prev.map((a) =>
-          a.id === editingAddressId
-            ? ({ ...a, ...addressForm } as Address)
-            : a
-        )
-      );
-    } else {
-      const newId = `addr-${Date.now()}`;
-      const newAddr: any = {
-        id: newId,
-        ...addressForm,
-        is_default: false,
-      };
-      setAddresses((prev) => [...prev, newAddr]);
-      setSelectedAddressId(newId);
+    try {
+      const saved = await saveCustomerAddress({
+        label: addressForm.label,
+        line1: addressForm.line1.trim(),
+        line2: addressForm.line2.trim() || null,
+        city: addressForm.city.trim() || "Renukoot",
+        state: addressForm.state.trim() || "Uttar Pradesh",
+        pincode: addressForm.pincode.trim() || "231217",
+        recipient_name: addressForm.recipient_name.trim() || "Customer",
+        phone_number: addressForm.phone_number.trim() || "+919876543210",
+        lat: 24.2185,
+        lng: 83.0326,
+        is_default: addresses.length === 0,
+      });
+
+      setAddresses((prev) => {
+        const filtered = editingAddressId
+          ? prev.filter((a) => a.id !== editingAddressId)
+          : prev;
+        return [...filtered, saved];
+      });
+      setSelectedAddressId(saved.id);
+      setShowAddressModal(false);
+    } catch (err: any) {
+      setOrderError(err?.message || "Failed to save delivery address.");
     }
-    setShowAddressModal(false);
   };
 
   // Update Quote whenever items, coupon or address changes
@@ -226,10 +257,22 @@ export default function CheckoutScreen() {
   };
 
   const handlePlaceOrder = async () => {
-    if (!quote || submitting) return;
+    if (
+      !quote ||
+      submitting ||
+      !isAuthenticated ||
+      !selectedAddressId ||
+      !quote.isServiceable ||
+      quote.shopAvailable === false
+    ) {
+      return;
+    }
 
     setSubmitting(true);
-    posthog?.capture("checkout_order_submission_started");
+    setOrderError(null);
+    posthog?.capture("checkout_order_submission_started", {
+      shop_id: targetShopId,
+    });
 
     try {
       const result = await placeOrder({
@@ -240,21 +283,28 @@ export default function CheckoutScreen() {
         couponCode: appliedCoupon,
         deliveryInstructions,
         quote,
+        idempotencyKey,
       });
 
       if (result.success && result.orderId) {
         setPlacedOrderId(result.orderId);
-        setPlacedOrderNumber(result.orderNumber || "ZUNO-12345");
-        clearCart();
+        setPlacedOrderNumber(result.orderNumber || "ZUNO-ORDER");
+        if (targetShopId) {
+          clearShopCart(targetShopId);
+        }
         setShowSuccessModal(true);
         posthog?.capture("checkout_order_created", {
           order_id: result.orderId,
-          order_number: result.orderNumber || "ZUNO-12345",
-          total: quote.total,
+          order_number: result.orderNumber || "ZUNO-ORDER",
+          shop_id: targetShopId,
+          total: result.total ?? quote.total,
         });
+      } else {
+        setOrderError(result.message || "Unable to place order right now.");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error placing order:", err);
+      setOrderError(err?.message || "Failed to place order. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -353,8 +403,32 @@ export default function CheckoutScreen() {
           {/* STEP 1: DELIVERY ADDRESS SELECTION */}
           {currentStep === 1 && (
             <View style={styles.stepContainer}>
+              {!isAuthenticated && (
+                <View style={styles.availabilityAlertBox}>
+                  <Text style={styles.availabilityAlertText}>
+                    Sign in with your ZUNO customer account before placing a delivery order.
+                  </Text>
+                  <Pressable
+                    style={{ marginTop: 8, alignSelf: "flex-start", backgroundColor: GREEN, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 10 }}
+                    onPress={() => router.push("/login" as never)}
+                  >
+                    <Text style={{ color: "#FFFFFF", fontSize: 12, fontWeight: "800" }}>
+                      Sign In / Register
+                    </Text>
+                  </Pressable>
+                </View>
+              )}
+
               <Text style={styles.sectionHeading}>Delivery Address</Text>
-              <Text style={styles.sectionSub}>Select a delivery address</Text>
+              <Text style={styles.sectionSub}>Select a saved delivery address</Text>
+
+              {isAuthenticated && addresses.length === 0 && (
+                <View style={styles.availabilityAlertBox}>
+                  <Text style={styles.availabilityAlertText}>
+                    No saved delivery address found on your account. Please add a verified address before placing an order.
+                  </Text>
+                </View>
+              )}
 
               {addresses.map((addr) => {
                 const isSelected = selectedAddressId === addr.id;
@@ -555,6 +629,20 @@ export default function CheckoutScreen() {
               <Text style={styles.sectionHeading}>Review & Place Order</Text>
               <Text style={styles.sectionSub}>Please review your order details</Text>
 
+              {(!isAuthenticated || !selectedAddressId || !quote.isServiceable || quote.shopAvailable === false || orderError) && (
+                <View style={styles.availabilityAlertBox}>
+                  <Text style={styles.availabilityAlertText}>
+                    {orderError ||
+                      (!isAuthenticated
+                        ? "Please sign in with your customer account before placing an order."
+                        : !selectedAddressId
+                        ? "Please select a saved delivery address from your account."
+                        : quote.serviceMessage ||
+                          "This shop is not accepting orders right now.")}
+                  </Text>
+                </View>
+              )}
+
               {/* Delivery Address Card Review */}
               <View style={styles.reviewCard}>
                 <View style={styles.reviewHeader}>
@@ -684,9 +772,23 @@ export default function CheckoutScreen() {
 
             {currentStep === 4 && (
               <Pressable
-                style={[styles.primaryBtn, submitting && styles.btnDisabled]}
+                style={[
+                  styles.primaryBtn,
+                  (submitting ||
+                    !isAuthenticated ||
+                    !selectedAddressId ||
+                    !quote.isServiceable ||
+                    quote.shopAvailable === false) &&
+                    styles.btnDisabled,
+                ]}
                 onPress={handlePlaceOrder}
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  !isAuthenticated ||
+                  !selectedAddressId ||
+                  !quote.isServiceable ||
+                  quote.shopAvailable === false
+                }
               >
                 {submitting ? (
                   <ActivityIndicator size="small" color="#FFFFFF" />
@@ -1520,5 +1622,18 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 13.5,
     fontWeight: "800",
+  },
+  availabilityAlertBox: {
+    backgroundColor: "#FEF2F2",
+    borderColor: "#FECACA",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+  },
+  availabilityAlertText: {
+    color: "#B91C1C",
+    fontSize: 12.5,
+    fontWeight: "700",
   },
 });

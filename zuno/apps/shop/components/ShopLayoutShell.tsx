@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -49,6 +49,10 @@ export default function ShopLayoutShell({
   const [isOnline, setIsOnline] = useState<boolean>(Boolean(shop.isActive ?? true));
   const [togglingStatus, setTogglingStatus] = useState(false);
 
+  useEffect(() => {
+    setIsOnline(Boolean(shop.isActive ?? true));
+  }, [shop.isActive]);
+
   const handleToggleStoreStatus = async () => {
     if (togglingStatus) return;
     const newStatus = !isOnline;
@@ -56,6 +60,7 @@ export default function ShopLayoutShell({
     try {
       await toggleShopOnlineStatusAction(newStatus);
       setIsOnline(newStatus);
+      router.refresh();
     } catch (err: any) {
       alert(err?.message || "Failed to update store status.");
     } finally {

@@ -1,8 +1,26 @@
 "use server";
 
+import { z } from "zod";
 import { createServerSupabaseClient } from "../../lib/supabase-server";
 import { requireApprovedShopkeeper } from "../../lib/authGuard";
 import { revalidatePath } from "next/cache";
+
+const shopProductIdSchema = z.string().uuid("Invalid shop product identifier.");
+
+export type ProductRequestStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface ProductRequestItem {
+  id: string;
+  productName: string;
+  categoryName: string;
+  unit: string;
+  brand?: string | null;
+  suggestedPrice?: number | null;
+  status: ProductRequestStatus;
+  rejectionReason?: string | null;
+  createdAt: string;
+  reviewedAt?: string | null;
+}
 
 export interface ShopProductItem {
   id: string;
@@ -96,8 +114,79 @@ function inferShopCategory(
   return { id: fallback.id, name: fallback.name, slug: fallback.slug };
 }
 
+async function queryShopProductRequests(
+  supabase: ReturnType<typeof createServerSupabaseClient>,
+  shopId: string
+): Promise<{
+  requests: ProductRequestItem[];
+  error?: string;
+}> {
+  const { data: reqRows, error: reqErr } = await supabase
+    .from("product_requests")
+    .select(`
+      id,
+      product_name,
+      brand,
+      unit,
+      suggested_price,
+      status,
+      rejection_reason,
+      created_at,
+      reviewed_at,
+      categories (
+        name
+      )
+    `)
+    .eq("shop_id", shopId)
+    .order("created_at", { ascending: false });
+
+  if (reqErr) {
+    console.error("[Products] product_requests query error:", reqErr.code, reqErr.message);
+    return {
+      requests: [],
+      error: "Unable to load submitted product requests right now. Please try refreshing.",
+    };
+  }
+
+  const requests: ProductRequestItem[] = (reqRows || []).map((row: any) => {
+    const rawStatus = String(row.status || "PENDING").toUpperCase();
+    const status: ProductRequestStatus =
+      rawStatus === "APPROVED" || rawStatus === "REJECTED" ? rawStatus : "PENDING";
+
+    return {
+      id: row.id,
+      productName: row.product_name,
+      categoryName: row.categories?.name || "General",
+      unit: row.unit || "unit",
+      brand: row.brand || null,
+      suggestedPrice:
+        row.suggested_price !== null && row.suggested_price !== undefined
+          ? Number(row.suggested_price)
+          : null,
+      status,
+      rejectionReason: row.rejection_reason || null,
+      createdAt: row.created_at,
+      reviewedAt: row.reviewed_at || null,
+    };
+  });
+
+  return { requests };
+}
+
 /**
- * Action: Fetch shop inventory, registered category, and initial category-aware suggestions.
+ * Action: Fetches product requests belonging solely to the authenticated shopkeeper's shop.
+ */
+export async function getShopProductRequestsAction(): Promise<{
+  requests: ProductRequestItem[];
+  error?: string;
+}> {
+  const auth = await requireApprovedShopkeeper();
+  const supabase = createServerSupabaseClient();
+  return queryShopProductRequests(supabase, auth.shopId);
+}
+
+/**
+ * Action: Fetch shop inventory, registered category, initial suggestions, and submitted requests.
  */
 export async function getShopProductsAction(): Promise<{
   shop: ShopIdentityWithCategory;
@@ -105,6 +194,8 @@ export async function getShopProductsAction(): Promise<{
   categories: CategoryItem[];
   shopProducts: ShopProductItem[];
   catalogProducts: CatalogProductItem[];
+  productRequests: ProductRequestItem[];
+  productRequestsError?: string;
 }> {
   const auth = await requireApprovedShopkeeper();
   const supabase = createServerSupabaseClient();
@@ -249,12 +340,17 @@ export async function getShopProductsAction(): Promise<{
     return a.name.localeCompare(b.name);
   });
 
+  const { requests: productRequests, error: productRequestsError } =
+    await queryShopProductRequests(supabase, shopId);
+
   return {
     shop,
     pendingCount: pendingCount || 0,
     categories,
     shopProducts,
     catalogProducts: allCatalogProducts,
+    productRequests,
+    productRequestsError,
   };
 }
 
@@ -477,9 +573,10 @@ export async function checkProductDuplicateAction(
 }
 
 /**
+/**
  * Action: Add or update a central catalog product listing in the shopkeeper's store.
- * - Stores shop-specific selling price and availability in `shop_products`.
- * - Syncs available quantity in `inventory`.
+ * - Prioritizes atomic PostgreSQL RPC `upsert_shop_product_and_inventory`.
+ * - Coordinated fallback ensures price and stock are updated safely and isolated to auth.shopId.
  * - Never modifies global `products` table attributes.
  */
 export async function addCatalogProductToShopAction(
@@ -490,7 +587,7 @@ export async function addCatalogProductToShopAction(
   const auth = await requireApprovedShopkeeper();
   const supabase = createServerSupabaseClient();
 
-  if (!productId) {
+  if (!productId || typeof productId !== "string") {
     throw new Error("Invalid product selection.");
   }
   if (typeof price !== "number" || isNaN(price) || price < 0) {
@@ -500,79 +597,29 @@ export async function addCatalogProductToShopAction(
     throw new Error("Please enter a valid stock quantity of 0 or more.");
   }
 
-  // 1. Check if shop_products row already exists
-  const { data: existingListing } = await supabase
-    .from("shop_products")
-    .select("id")
-    .eq("shop_id", auth.shopId)
-    .eq("product_id", productId)
-    .maybeSingle();
-
-  let shopProductId = existingListing?.id;
-
-  if (existingListing) {
-    // Update existing listing
-    const { error: updErr } = await supabase
-      .from("shop_products")
-      .update({
-        price,
-        stock,
-        available: stock > 0,
-      })
-      .eq("id", existingListing.id)
-      .eq("shop_id", auth.shopId);
-
-    if (updErr) {
-      throw new Error(`Failed to update product listing: ${updErr.message}`);
+  // Execute atomic transactional PostgreSQL RPC to ensure shop_products and inventory update together
+  const { data: rpcRes, error: rpcErr } = await supabase.rpc(
+    "upsert_shop_product_and_inventory",
+    {
+      p_shop_id: auth.shopId,
+      p_product_id: productId,
+      p_price: price,
+      p_stock: Math.floor(stock),
     }
-  } else {
-    // Insert new shop listing
-    const { data: inserted, error: insErr } = await supabase
-      .from("shop_products")
-      .insert({
-        shop_id: auth.shopId,
-        product_id: productId,
-        price,
-        stock,
-        available: stock > 0,
-      })
-      .select("id")
-      .single();
+  );
 
-    if (insErr) {
-      throw new Error(`Failed to add product to shop: ${insErr.message}`);
+  if (rpcErr) {
+    console.error("upsert_shop_product_and_inventory RPC error:", rpcErr.message);
+    if (rpcErr.code === "42883") {
+      throw new Error(
+        "Product listing is temporarily unavailable: atomic database migration 012 has not been applied. Please contact an administrator."
+      );
     }
-    shopProductId = inserted?.id;
+    throw new Error(`Failed to update product listing and inventory: ${rpcErr.message}`);
   }
 
-  // 2. Sync inventory table
-  if (shopProductId) {
-    try {
-      const { data: invRow } = await supabase
-        .from("inventory")
-        .select("id")
-        .eq("shop_product_id", shopProductId)
-        .maybeSingle();
-
-      if (invRow) {
-        await supabase
-          .from("inventory")
-          .update({
-            quantity: stock,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", invRow.id);
-      } else {
-        await supabase
-          .from("inventory")
-          .insert({
-            shop_product_id: shopProductId,
-            quantity: stock,
-          });
-      }
-    } catch {
-      // Non-blocking if inventory trigger handles it
-    }
+  if (!rpcRes?.success) {
+    throw new Error("Atomic listing and inventory synchronization did not confirm success.");
   }
 
   revalidatePath("/dashboard");
@@ -581,16 +628,19 @@ export async function addCatalogProductToShopAction(
 
   return {
     success: true,
-    message: existingListing
-      ? "Product price and stock updated in your storefront."
-      : "Product successfully listed in your storefront.",
+    message: "Product listing and inventory successfully updated.",
   };
 }
 
 /**
  * Action: Submits a new-product request to the central catalog governance system.
- * When a shopkeeper cannot find a product in the catalog, this records their request
- * for review by an administrator without creating unverified duplicate global records.
+ * Security & Integrity Guarantees:
+ * - requested_by is strictly derived from authenticated session (never caller-supplied).
+ * - status is hardcoded to 'PENDING'.
+ * - Review fields (reviewed_by, rejection_reason) are never set by shopkeepers.
+ * - Rejects identical duplicates if product already exists in central catalog.
+ * - NEVER reports false success: returns true ONLY when canonical request is persisted.
+ * - NEVER returns fabricated request IDs.
  */
 export async function submitProductRequestAction(params: {
   productName: string;
@@ -618,8 +668,14 @@ export async function submitProductRequestAction(params: {
   if (!params.unit || !params.unit.trim()) {
     throw new Error("Please specify a pack size or unit.");
   }
+  if (params.suggestedPrice !== undefined && params.suggestedPrice !== null) {
+    const numPrice = Number(params.suggestedPrice);
+    if (isNaN(numPrice) || numPrice < 0) {
+      throw new Error("Suggested price must be greater than or equal to 0.");
+    }
+  }
 
-  // Check for duplicate in central catalog
+  // 1. Check for duplicate in central catalog
   const { isDuplicate, matches } = await checkProductDuplicateAction(cleanName, params.categoryId);
   if (isDuplicate && matches.length > 0) {
     return {
@@ -628,7 +684,7 @@ export async function submitProductRequestAction(params: {
     };
   }
 
-  // Attempt to insert into product_requests
+  // 2. Canonical insert into public.product_requests
   try {
     const { data: reqData, error: reqErr } = await supabase
       .from("product_requests")
@@ -639,7 +695,7 @@ export async function submitProductRequestAction(params: {
         product_name: cleanName,
         brand: params.brand?.trim() || null,
         unit: params.unit.trim(),
-        suggested_price: params.suggestedPrice || null,
+        suggested_price: params.suggestedPrice != null ? Number(params.suggestedPrice) : null,
         notes: params.notes?.trim() || null,
         image_url: params.imageUrl?.trim() || null,
         status: "PENDING",
@@ -648,34 +704,57 @@ export async function submitProductRequestAction(params: {
       .single();
 
     if (!reqErr && reqData?.id) {
+      // Also log activity for audit trail
+      try {
+        await supabase.from("activity_logs").insert({
+          actor_id: auth.userId,
+          action: "PRODUCT_REQUEST_SUBMITTED",
+          entity_type: "product_request",
+          entity_id: reqData.id,
+          metadata: {
+            productName: cleanName,
+            categoryId: params.categoryId,
+            shopId: auth.shopId,
+          },
+        });
+      } catch {}
+
       return {
         success: true,
         requestId: reqData.id,
         message: `Your request for "${cleanName}" has been submitted for central catalog approval.`,
       };
     }
-  } catch {}
 
-  // Fallback if product_requests table migration is not yet applied
-  try {
-    await supabase.from("activity_logs").insert({
-      actor_id: auth.userId,
-      action: "PRODUCT_REQUEST_SUBMITTED",
-      entity_type: "shop",
-      entity_id: auth.shopId,
-      metadata: {
-        productName: cleanName,
-        categoryId: params.categoryId,
-        unit: params.unit,
-        suggestedPrice: params.suggestedPrice,
-      },
-    });
-  } catch {}
+    // Handle database error without false success
+    if (reqErr) {
+      console.error("product_requests insert error:", reqErr.message);
 
+      // Distinguish unapplied migration from permission or constraint errors
+      if (reqErr.code === "42P01") {
+        return {
+          success: false,
+          message: "Product request submission is temporarily unavailable: catalog governance migration has not been applied to the database. Please contact support.",
+        };
+      }
+
+      return {
+        success: false,
+        message: `Failed to submit product request: ${reqErr.message}`,
+      };
+    }
+  } catch (err: any) {
+    console.error("submitProductRequestAction exception:", err?.message);
+    return {
+      success: false,
+      message: err?.message || "An unexpected error occurred while submitting your product request.",
+    };
+  }
+
+  // Fail-safe: Never return success or fabricated ID if code path somehow falls through
   return {
-    success: true,
-    requestId: "req-" + Date.now(),
-    message: `Your request for "${cleanName}" has been received and queued for catalog verification.`,
+    success: false,
+    message: "Failed to persist product request. Please try again.",
   };
 }
 
@@ -694,23 +773,42 @@ export async function updateShopProductAction(
     throw new Error("Price and stock must be positive numbers.");
   }
 
-  const { error } = await supabase
+  // 1. Fetch product_id for this shopProductId scoped strictly to auth.shopId
+  const { data: current, error: fetchErr } = await supabase
     .from("shop_products")
-    .update({ price, stock, available: stock > 0 })
+    .select("product_id")
     .eq("id", shopProductId)
-    .eq("shop_id", auth.shopId);
+    .eq("shop_id", auth.shopId)
+    .single();
 
-  if (error) {
-    throw new Error(`Failed to update product: ${error.message}`);
+  if (fetchErr || !current) {
+    throw new Error("Product listing not found or unauthorized.");
   }
 
-  // Sync inventory quantity
-  try {
-    await supabase
-      .from("inventory")
-      .update({ quantity: stock, updated_at: new Date().toISOString() })
-      .eq("shop_product_id", shopProductId);
-  } catch {}
+  // 2. Execute atomic transactional RPC
+  const { data: rpcRes, error: rpcErr } = await supabase.rpc(
+    "upsert_shop_product_and_inventory",
+    {
+      p_shop_id: auth.shopId,
+      p_product_id: current.product_id,
+      p_price: price,
+      p_stock: Math.floor(stock),
+    }
+  );
+
+  if (rpcErr) {
+    console.error("upsert_shop_product_and_inventory error:", rpcErr.message);
+    if (rpcErr.code === "42883") {
+      throw new Error(
+        "Product update is temporarily unavailable: atomic database migration 012 has not been applied. Please contact an administrator."
+      );
+    }
+    throw new Error(`Failed to update product: ${rpcErr.message}`);
+  }
+
+  if (!rpcRes?.success) {
+    throw new Error("Atomic product and inventory synchronization did not confirm success.");
+  }
 
   revalidatePath("/dashboard");
   revalidatePath("/products");
@@ -728,18 +826,123 @@ export async function toggleProductAvailabilityAction(
   const auth = await requireApprovedShopkeeper();
   const supabase = createServerSupabaseClient();
 
-  const { error } = await supabase
+  if (!shopProductId || typeof shopProductId !== "string") {
+    throw new Error("Invalid product listing identifier.");
+  }
+
+  const { data: updatedRows, error } = await supabase
     .from("shop_products")
-    .update({ available: isAvailable })
+    .update({ available: Boolean(isAvailable) })
     .eq("id", shopProductId)
-    .eq("shop_id", auth.shopId);
+    .eq("shop_id", auth.shopId)
+    .select("id");
 
   if (error) {
-    throw new Error(`Failed to update product availability: ${error.message}`);
+    console.error("[Products] Availability update error:", error.code, error.message);
+    throw new Error("Unable to update product availability right now.");
+  }
+
+  if (!updatedRows || updatedRows.length === 0) {
+    throw new Error("Product listing not found or unauthorized.");
   }
 
   revalidatePath("/dashboard");
   revalidatePath("/products");
   revalidatePath("/inventory");
   return { success: true };
+}
+
+/**
+ * Action: Safely removes a shop-specific product listing without touching the global catalog,
+ * other merchants' listings, or historical order snapshots.
+ * If referenced by active customer carts (FK SQLSTATE 23503), atomically marks listing unavailable & 0 stock.
+ */
+export async function removeShopProductAction(shopProductId: string): Promise<{
+  success: boolean;
+  mode: "DELETED" | "UNAVAILABLE_FALLBACK";
+  message: string;
+}> {
+  const auth = await requireApprovedShopkeeper();
+  const parsedId = shopProductIdSchema.safeParse(shopProductId);
+  if (!parsedId.success) {
+    throw new Error(parsedId.error.issues[0]?.message || "Invalid product listing identifier.");
+  }
+
+  const supabase = createServerSupabaseClient();
+
+  const { data: existingRow, error: fetchErr } = await supabase
+    .from("shop_products")
+    .select("id, product_id, price")
+    .eq("id", parsedId.data)
+    .eq("shop_id", auth.shopId)
+    .maybeSingle();
+
+  if (fetchErr) {
+    console.error("[Products] Failed to verify listing before removal:", fetchErr.code, fetchErr.message);
+    throw new Error("Unable to verify storefront listing right now.");
+  }
+
+  if (!existingRow) {
+    throw new Error("Product listing not found or unauthorized.");
+  }
+
+  const { data: deletedRows, error: delErr } = await supabase
+    .from("shop_products")
+    .delete()
+    .eq("id", parsedId.data)
+    .eq("shop_id", auth.shopId)
+    .select("id");
+
+  if (delErr) {
+    if (delErr.code === "23503") {
+      // Active customer cart references this shop_product_id; hide & zero stock atomically
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc(
+        "upsert_shop_product_and_inventory",
+        {
+          p_shop_id: auth.shopId,
+          p_product_id: existingRow.product_id,
+          p_price: Number(existingRow.price ?? 0),
+          p_stock: 0,
+        }
+      );
+
+      if (rpcErr || !rpcRes?.success) {
+        console.error(
+          "[Products] Fallback unavailable update failed:",
+          rpcErr?.code,
+          rpcErr?.message
+        );
+        throw new Error(
+          "This item is currently in a customer's active cart and could not be removed automatically."
+        );
+      }
+
+      revalidatePath("/dashboard");
+      revalidatePath("/products");
+      revalidatePath("/inventory");
+      return {
+        success: true,
+        mode: "UNAVAILABLE_FALLBACK",
+        message:
+          "This product is currently in an active customer cart, so it has been marked Out of Stock (hidden from new orders) to protect cart integrity.",
+      };
+    }
+
+    console.error("[Products] Delete shop_product error:", delErr.code, delErr.message);
+    throw new Error(`Failed to remove product from storefront: ${delErr.message}`);
+  }
+
+  if (!deletedRows || deletedRows.length === 0) {
+    throw new Error("Product listing not found or unauthorized.");
+  }
+
+  revalidatePath("/dashboard");
+  revalidatePath("/products");
+  revalidatePath("/inventory");
+
+  return {
+    success: true,
+    mode: "DELETED",
+    message: "Product removed from your storefront catalog.",
+  };
 }

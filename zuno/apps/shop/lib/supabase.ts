@@ -1,13 +1,39 @@
 import { createBrowserClient } from "@supabase/ssr";
 
-const SUPABASE_URL =
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  "https://mwcvagktpvlzorojdsxg.supabase.co";
+/**
+ * Validates and retrieves client-side Supabase configuration.
+ * Throws an explicit error if required public environment variables are missing.
+ * Embedded fallback credentials have been strictly removed.
+ */
+function getBrowserSupabaseConfig() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-const SUPABASE_ANON_KEY =
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im13Y3ZhZ2t0cHZsem9yb2pkc3hnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA2ODk4MDYsImV4cCI6MjEwNjI2NTgwNn0.KmkVlqAY8QmQItwU-JFbWzsFoHGjOtuef4jCVpDiAlY";
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error(
+      "Missing required Supabase configuration: NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY must be defined."
+    );
+  }
 
-export function createClient() {
-  return createBrowserClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return { supabaseUrl, supabaseAnonKey };
+}
+
+export function createClient(options?: { rememberMe?: boolean }) {
+  const { supabaseUrl, supabaseAnonKey } = getBrowserSupabaseConfig();
+
+  // Remember Me OFF: Session cookie (no max-age / expires attribute, cleared upon browser session termination)
+  // Remember Me ON (Default): Persistent 30-day session cookie
+  if (options && options.rememberMe === false) {
+    return createBrowserClient(supabaseUrl, supabaseAnonKey, {
+      cookieOptions: {
+        maxAge: undefined,
+      },
+    });
+  }
+
+  return createBrowserClient(supabaseUrl, supabaseAnonKey, {
+    cookieOptions: {
+      maxAge: 60 * 60 * 24 * 30, // 30 days persistent session
+    },
+  });
 }

@@ -50,10 +50,14 @@ export async function getShopAnalyticsAction(): Promise<AnalyticsData> {
   };
 
   // 2. Fetch orders
-  const { data: orders } = await supabase
+  const { data: orders, error: ordersErr } = await supabase
     .from("orders")
     .select("id, status")
     .eq("shop_id", shopId);
+
+  if (ordersErr) {
+    console.error("[Analytics] Order analytics query error:", ordersErr.code, ordersErr.message);
+  }
 
   let totalOrders = 0;
   let deliveredOrders = 0;
@@ -78,7 +82,7 @@ export async function getShopAnalyticsAction(): Promise<AnalyticsData> {
   }
 
   const fulfillmentRate =
-    totalOrders > 0 ? Math.round((deliveredOrders / totalOrders) * 100) : 100;
+    totalOrders > 0 ? Math.round((deliveredOrders / totalOrders) * 100) : 0;
 
   // 3. Fetch inventory categories distribution
   const { data: spRows } = await supabase

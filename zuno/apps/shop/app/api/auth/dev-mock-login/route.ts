@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
 
     // Requirement 7: Enforce server-side shop approval check; do not bypass approval status
     const isApproved = Boolean(shop.is_approved) && shop.approval_status === "APPROVED";
-    const redirectUrl = isApproved ? "/dashboard" : `/status?phone=${clean10}`;
+    const redirectUrl = isApproved ? "/dashboard" : "/status";
 
     const sessionPayload = {
       userId: shop.owner_id,

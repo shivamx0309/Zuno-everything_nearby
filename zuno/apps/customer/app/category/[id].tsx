@@ -125,13 +125,22 @@ export default function CategoryListingScreen() {
   };
 
   const handleAddToCart = (product: CategoryProduct) => {
-    if (!product.inStock) return;
+    if (!product.inStock || !product.shop?.canOrder) return;
 
     addToCartStore({
       id: product.id,
+      shopProductId: product.shopProductId || product.id,
+      productId: product.productId,
       name: product.name,
       price: product.price,
       unit: product.unit,
+      shopId: product.shopId,
+      shopName: product.shopName,
+      shopDistance: product.shop?.distance,
+      stock: product.stock,
+      image_url: product.image_url,
+      emoji: product.emoji,
+      color: product.color,
     });
 
     analytics.trackAddToCart({
@@ -143,6 +152,7 @@ export default function CategoryListingScreen() {
 
     posthog?.capture("add_to_cart", {
       product_id: product.id,
+      shop_id: product.shopId,
       product_name: product.name,
       price: product.price,
       category: category?.name || "General",

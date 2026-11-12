@@ -68,53 +68,37 @@ const FAQ_SECTIONS = [
 
 export default function HelpPage() {
   return (
-    <div className="py-6 sm:py-10">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        {/* Header Section */}
-        <div className="text-center mb-6 sm:mb-8">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EAF4E5] border border-[#D5E8CE] text-[#0F5D3A] text-xs font-bold mb-3 shadow-xs">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#22A06B]" />
-            <span>Help Center &amp; Knowledge Base</span>
+    <div className="py-12 sm:py-20">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+        {/* Header */}
+        <div className="text-center mb-12">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#EAF4E5] text-[#0F5D3A] text-xs font-bold mb-4">
+            Help Center & Knowledge Base
           </div>
-          <h1 className="text-2xl sm:text-4xl lg:text-5xl font-black text-[#17231D] tracking-tight leading-tight">
+          <h1 className="text-3xl sm:text-5xl font-black text-[#111827] tracking-tight">
             Frequently Asked <span className="text-[#0F5D3A]">Questions</span>
           </h1>
-          <p className="mt-2.5 text-xs sm:text-sm lg:text-base text-[#55695D] leading-relaxed max-w-2xl mx-auto">
+          <p className="mt-4 text-base sm:text-lg text-[#6B7A70] leading-relaxed max-w-2xl mx-auto">
             Everything you need to know about ZUNO’s hyperlocal shopping experience in Renukoot.
           </p>
         </div>
 
         {/* FAQ Groups */}
-        <div className="space-y-4 sm:space-y-5 mb-6 sm:mb-8">
+        <div className="space-y-10 mb-14">
           {FAQ_SECTIONS.map((section) => (
-            <div
-              key={section.category}
-              className="bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-6 lg:p-7 border border-[#EAEFEA] shadow-xs"
-            >
-              {/* Category Header */}
-              <div className="flex items-center justify-between pb-3.5 mb-4 border-b border-[#F0F4F0]">
-                <div className="flex items-center gap-2.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#0F5D3A]" />
-                  <h2 className="text-lg sm:text-xl font-black text-[#17231D] tracking-tight">
-                    {section.category}
-                  </h2>
-                </div>
-                <span className="text-[11px] font-bold text-[#6B7A70] bg-[#F8FAF6] px-2.5 py-0.5 rounded-full border border-[#EAEFEA]">
-                  {section.items.length} {section.items.length === 1 ? "Question" : "Questions"}
-                </span>
-              </div>
+            <div key={section.category} className="bg-white rounded-3xl p-6 sm:p-8 border border-[#EAEFEA] shadow-sm">
+              <h2 className="text-xl font-black text-[#111827] mb-6 flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#0F5D3A]" />
+                {section.category}
+              </h2>
 
-              {/* FAQ Items */}
-              <div className="space-y-3.5 sm:space-y-4">
+              <div className="space-y-5">
                 {section.items.map((item, idx) => (
-                  <div
-                    key={idx}
-                    className="pb-3.5 sm:pb-4 border-b border-[#F4F6F4] last:border-b-0 last:pb-0"
-                  >
-                    <h3 className="font-extrabold text-sm sm:text-base text-[#17231D]">
+                  <div key={idx} className="pb-5 border-b border-[#F4F6F4] last:border-b-0 last:pb-0">
+                    <h3 className="font-extrabold text-sm sm:text-base text-[#111827]">
                       {item.question}
                     </h3>
-                    <p className="mt-1.5 text-xs sm:text-sm text-[#55695D] leading-relaxed max-w-4xl">
+                    <p className="mt-2 text-xs sm:text-sm text-[#4B5563] leading-relaxed">
                       {item.answer}
                     </p>
                   </div>
@@ -125,56 +109,34 @@ export default function HelpPage() {
         </div>
 
         {/* Assistance Channel Box */}
-        <div className="p-5 sm:p-6 lg:p-7 rounded-2xl sm:rounded-3xl bg-[#EAF4E5] border border-[#D5E8CE] text-[#0F5D3A]">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-5">
-            <div>
-              <h2 className="text-lg sm:text-xl font-black text-[#17231D]">
-                Still need assistance?
-              </h2>
-              <p className="text-xs sm:text-sm text-[#246142] mt-1 leading-relaxed max-w-2xl">
-                For operational inquiries or partner support, reach out directly through our verified
-                channels. Active customer order support is managed directly within the Customer App.
-              </p>
+        <div className="p-8 rounded-3xl bg-[#EAF4E5] border border-[#CDE3C4] text-[#0F5D3A]">
+          <h2 className="text-xl font-black text-[#111827] mb-2">Still need assistance?</h2>
+          <p className="text-xs sm:text-sm text-[#246142] mb-6 leading-relaxed">
+            For operational inquiries or partner support, reach out directly through our verified
+            channels. Active customer order support is managed directly within the Customer App.
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="p-4 rounded-xl bg-white/80 border border-[#D5E8CE]">
+              <span className="text-xs font-bold text-[#6B7A70] block">Toll-Free Partner Helpline</span>
+              <span className="text-sm font-extrabold text-[#111827] mt-0.5 block">+918887602317</span>
+              <span className="text-[11px] text-[#246142] mt-1 block">Hours: 7:00 AM – 11:00 PM Daily</span>
             </div>
-            <div className="shrink-0">
-              <Link
-                href="/contact"
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#0F5D3A] text-white hover:bg-[#0B482D] transition shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0F5D3A]"
-              >
-                <span>Complete Contact Details</span>
-                <span>→</span>
-              </Link>
+
+            <div className="p-4 rounded-xl bg-white/80 border border-[#D5E8CE]">
+              <span className="text-xs font-bold text-[#6B7A70] block">Partner Desk Email</span>
+              <span className="text-sm font-extrabold text-[#111827] mt-0.5 block">zunonearby@gmail.com</span>
+              <span className="text-[11px] text-[#246142] mt-1 block">For shop and delivery partner inquiries</span>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 sm:gap-4">
-            <a
-              href="tel:8887602317"
-              className="p-4 rounded-xl bg-white border border-[#D5E8CE] hover:border-[#22A06B] transition shadow-xs group block"
+          <div className="mt-6 text-center">
+            <Link
+              href="/contact"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold bg-[#0F5D3A] text-white hover:bg-[#0B482D] transition shadow-sm"
             >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-[#6B7A70] block">Toll-Free Partner Helpline</span>
-                <span className="text-xs font-bold text-[#0F5D3A] group-hover:translate-x-0.5 transition">Call ↗</span>
-              </div>
-              <span className="text-sm sm:text-base font-extrabold text-[#17231D] mt-0.5 block group-hover:text-[#0F5D3A] transition-colors">
-                8887602317
-              </span>
-              <span className="text-[11px] text-[#246142] mt-1 block">Hours: 7:00 AM – 11:00 PM Daily</span>
-            </a>
-
-            <a
-              href="mailto:zunonearby@gmail.com"
-              className="p-4 rounded-xl bg-white border border-[#D5E8CE] hover:border-[#22A06B] transition shadow-xs group block"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-[#6B7A70] block">Partner Desk Email</span>
-                <span className="text-xs font-bold text-[#0F5D3A] group-hover:translate-x-0.5 transition">Email ↗</span>
-              </div>
-              <span className="text-sm sm:text-base font-extrabold text-[#17231D] mt-0.5 block group-hover:text-[#0F5D3A] transition-colors">
-                zunonearby@gmail.com
-              </span>
-              <span className="text-[11px] text-[#246142] mt-1 block">For shop and delivery partner inquiries</span>
-            </a>
+              View Complete Contact Information →
+            </Link>
           </div>
         </div>
       </div>
